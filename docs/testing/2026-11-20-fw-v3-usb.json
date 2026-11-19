@@ -1,0 +1,155 @@
+{
+  "passed": 33,
+  "checks": [
+    "healthy safe boot",
+    "schema 3 / eight strips / three inputs",
+    "Wi-Fi password redacted",
+    "reject wrong schema",
+    "atomic reject wrong schema",
+    "reject missing strip",
+    "atomic reject missing strip",
+    "reject excessive current limit",
+    "atomic reject excessive current limit",
+    "reject invalid current calibration",
+    "atomic reject invalid current calibration",
+    "reject invalid input range",
+    "atomic reject invalid input range",
+    "reject out of bounds center",
+    "atomic reject out of bounds center",
+    "reject invalid preset content",
+    "atomic reject invalid preset content",
+    "reject action {'action': 'master', 'on': 'true'}",
+    "reject action {'action': 'reset', 'channel': 8}",
+    "reject action {'action': 'preset_load', 'slot': 9}",
+    "reject action {'action': 'nonexistent'}",
+    "apply config",
+    "read back config",
+    "save preset",
+    "preset contains eight strips",
+    "apply temporary change",
+    "load preset",
+    "preset restored brightness",
+    "restore initial config",
+    "reboot command",
+    "config persists after reboot",
+    "safe healthy reboot",
+    "oversize line discarded through newline"
+  ],
+  "finalStatus": {
+    "product": "ZVER L8",
+    "hardware": 3,
+    "firmware": "0.3.0-dev",
+    "uptimeMs": 8501,
+    "master": false,
+    "vbat": 0,
+    "ign": false,
+    "hold": false,
+    "ioOk": true,
+    "ioFault": false,
+    "powerStatus": "USB / supply outside 9-16.5 V",
+    "totalAmps": 0,
+    "sensorOn": false,
+    "sensorFault": false,
+    "heap": 197624,
+    "psram": 2097152,
+    "flash": 16777216,
+    "ap": false,
+    "apSsid": "ZVER-L8",
+    "canStatus": "running 0 fps err=0 rec=0",
+    "canBitrate": "500k",
+    "dataFresh": false,
+    "rpm": 0,
+    "speed": 0,
+    "temp": 0,
+    "throttle": 0,
+    "channels": [
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      }
+    ],
+    "inputs": [
+      {
+        "mv": 0,
+        "volts": 0,
+        "value": 0
+      },
+      {
+        "mv": 0,
+        "volts": 0,
+        "value": 0
+      },
+      {
+        "mv": 0,
+        "volts": 0,
+        "value": 0
+      }
+    ],
+    "imu": {
+      "ok": true,
+      "ax": -0.076294914,
+      "ay": -0.098699637,
+      "az": 1.007879138,
+      "gx": 0.588419139,
+      "gy": -0.425841451,
+      "gz": -0.172760859,
+      "temp": 27.5234375,
+      "lateralG": -0.098699637,
+      "yaw": -0.172760859
+    },
+    "otaConfirmed": true
+  },
+  "firmwareSha256": "839bef4261d6837318969332086e88c36ccd80ea026883fb0c71a88360ea0bbe"
+}

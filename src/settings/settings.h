@@ -2,6 +2,7 @@
 #define SETTINGS_H
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include "led_control/led_control.h"
 
 #define NUM_PRESETS 3
@@ -31,7 +32,16 @@ struct Preset {
     CanSettings can;
 };
 
+struct InputSettings { int mode; float low, high, thresholdMv; };
+
 struct SavedData {
+    bool autoStart;
+    bool allowWithoutIgn;
+    bool sensor5v;
+    int bitrate;
+    float channelMaxAmps[8];
+    float channelCal[8];
+    InputSettings inputs[3];
     CanSettings can_setting;
     StripSettings stripSettings[NUM_STRIPS];
     int numLeds[NUM_STRIPS];
@@ -54,5 +64,9 @@ void settingsTick();
 void settingsPresetSave(int i);
 bool settingsPresetLoad(int i);
 String settingsPresetName(int i);
+
+String settingsJson(bool secrets=false);
+bool settingsApply(JsonVariantConst config, String& error);
+bool settingsHealthy();
 
 #endif

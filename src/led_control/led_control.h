@@ -35,7 +35,7 @@ struct StripSettings {
 extern CanSettings can_setting;
 extern StripSettings stripSettings[NUM_STRIPS];
 // Extern LED and side settings
-extern int numLedsPerStrip[6];
+extern int numLedsPerStrip[NUM_STRIPS];
 
 // Function to initialize the LED strips
 void initializeLEDStrips();

@@ -64,9 +64,8 @@ static void startSTA() {
 }
 
 static bool anyNetworkConfigured() {
-    if (wifiSsid.length()) return true;
-    for (int i = 0; i < knownCount; i++) if (knownNets[i].ssid[0]) return true;
-    return false;
+    // Clearing the saved SSID explicitly selects AP-only mode.
+    return wifiSsid.length() > 0;
 }
 
 static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
@@ -76,7 +75,7 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     lastLog = millis();
     uint8_t r = info.wifi_sta_disconnected.reason;
     const char* why = r == 201 ? "no AP found" : r == 15 ? "wrong password (handshake timeout)" : r == 202 ? "auth fail" : r == 2 ? "auth expire" : r == 8 ? "assoc leave" : "";
-    sysLog("Wi-Fi STA disconnected, reason " + String(r) + " " + why);
+    Serial.println("Wi-Fi STA disconnected, reason " + String(r) + " " + why);
 }
 
 // One scan at boot: start with a network that is actually in range
@@ -99,10 +98,10 @@ static void pickVisibleFirst() {
 
 void netBegin() {
     WiFi.onEvent(onWifiEvent);
-    WiFi.persistent(false);  // creds live in settings.dat, don't write NVS on every boot
+    WiFi.persistent(false);  // credentials live in config-v3.json
     WiFi.setAutoReconnect(false);
     WiFi.setSleep(false);    // modem sleep adds 100-300 ms to every HTTP request
-    WiFi.setHostname("zvercustom");
+    WiFi.setHostname("zver-l8");
     if (!anyNetworkConfigured()) {
         startAP();
         return;
@@ -133,7 +132,7 @@ void netTick() {
         if (staDownSince) {
             staDownSince = 0;
             sysLog("Wi-Fi connected " + WiFi.SSID() + " " + WiFi.localIP().toString());
-            if (MDNS.begin("zvercustom")) MDNS.addService("http", "tcp", 80);
+            if (MDNS.begin("zver-l8")) MDNS.addService("http", "tcp", 80);
         }
         stopAP();
         return;

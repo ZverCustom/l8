@@ -1,5 +1,6 @@
 #include "can_bus.h"
 #include <Arduino.h>
+#include "power/power.h"
 
 void CANBus::begin(int rxPin, int txPin, int stbPin, twai_timing_config_t timingConfig, bool listenOnly) {
     this->rxPin = rxPin;
@@ -8,14 +9,14 @@ void CANBus::begin(int rxPin, int txPin, int stbPin, twai_timing_config_t timing
     this->timing = timingConfig;
     this->listenOnly = listenOnly;
 
-    pinMode(stbPin, OUTPUT);
-    digitalWrite(stbPin, LOW); // Set STB pin low to activate CAN transceiver
+    powerCanSilent(true);
 
     install();
 }
 
 void CANBus::install() {
     connected = false;
+    powerCanSilent(true);
     twai_mode_t mode = listenOnly ? TWAI_MODE_LISTEN_ONLY : TWAI_MODE_NORMAL;
     twai_general_config_t generalConfig = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)txPin, (gpio_num_t)rxPin, mode);
     generalConfig.rx_queue_len = 32;
@@ -31,6 +32,7 @@ void CANBus::install() {
         return;
     }
     connected = true;
+    powerCanSilent(listenOnly);
     Serial.printf("TWAI started (%s, %s)\n", listenOnly ? "listen only" : "normal", bitrateName(bitrateIdx));
 }
 

@@ -50,7 +50,6 @@ static void rotateIfNeeded() {
 
 void sysLog(const String& msg) {
     Serial.println(msg);
-    bool wasPaused = ledsPaused();
     ledsPause();
     rotateIfNeeded();
     File f = LittleFS.open(LOG_PATH, "a");
@@ -60,7 +59,7 @@ void sysLog(const String& msg) {
         f.println(msg);
         f.close();
     }
-    if (!wasPaused) ledsResume();
+    ledsResume();
 }
 
 void sysBegin() {

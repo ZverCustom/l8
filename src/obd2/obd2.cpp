@@ -26,6 +26,7 @@ void OBD2::sendRequest(uint8_t pid) {
 }
 
 bool OBD2::handleFrame(const twai_message_t &f, uint8_t pid) {
+    if (f.extd || f.rtr || f.data_length_code < (pid==0x0C ? 5 : 4)) return false;
     if (f.identifier < 0x7E8 || f.identifier > 0x7EF) return false;
     if (f.data[1] != 0x41 || f.data[2] != pid) return false;
     switch (pid) {

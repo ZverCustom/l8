@@ -1,0 +1,110 @@
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x15 (USB_UART_CHIP_RESET),boot:0x8 (SPI_FAST_FLASH_BOOT)
+Saved PC:0x42025f9e
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce3808,len:0x4bc
+load:0x403c9700,len:0xbd8
+load:0x403cc700,len:0x2a0c
+entry 0x403c98d0
+
+L8 v3 USB diagnostic | uptime=1s | reset=0
+ESP32: ESP32-S3 rev=0 cores=2 | flash=16 MB (expected 16)
+PSRAM: chip=2048 KB (expected 2048), capacity=PASS, usable=2045 KB, 64 KB scratch test=PASS | heap=369604
+GPIO: HOLD=0 (must be 0), IGN=0, 5V_FAULT_N=1 | I2C SDA=1 SCL=1
+ADC: VBAT=11.92 V (USB only: near 0), IS=0 mV (DEN off) | IN=0,0,0 mV
+PCA9555 @0x20: PASS OUT=0x2000 CFG=0x0000 PIN=0x2000
+LSM6DS3TR-C @0x6A: WHO=0x6A (expected 0x6A), init=PASS
+IMU: temp=24.3 C accel=0.010,0.017,1.024 g gyro=0.77,-0.49,-0.16 dps
+Requested mode: USB only; LED power/DATA, DEN and sensor 5V OFF; CAN silent; HOLD LOW.
+
+L8 v3 USB diagnostic | uptime=3s | reset=0
+ESP32: ESP32-S3 rev=0 cores=2 | flash=16 MB (expected 16)
+PSRAM: chip=2048 KB (expected 2048), capacity=PASS, usable=2045 KB, 64 KB scratch test=PASS | heap=369240
+GPIO: HOLD=0 (must be 0), IGN=0, 5V_FAULT_N=1 | I2C SDA=1 SCL=1
+ADC: VBAT=11.92 V (USB only: near 0), IS=0 mV (DEN off) | IN=0,0,0 mV
+PCA9555 @0x20: PASS OUT=0x2000 CFG=0x0000 PIN=0x2000
+LSM6DS3TR-C @0x6A: WHO=0x6A (expected 0x6A), init=PASS
+IMU: temp=24.3 C accel=0.010,0.018,1.025 g gyro=0.74,-0.42,-0.21 dps
+Requested mode: USB only; LED power/DATA, DEN and sensor 5V OFF; CAN silent; HOLD LOW.
+
+L8 v3 USB diagnostic | uptime=5s | reset=0
+ESP32: ESP32-S3 rev=0 cores=2 | flash=16 MB (expected 16)
+PSRAM: chip=2048 KB (expected 2048), capacity=PASS, usable=2045 KB, 64 KB scratch test=PASS | heap=369240
+GPIO: HOLD=0 (must be 0), IGN=0, 5V_FAULT_N=1 | I2C SDA=1 SCL=1
+ADC: VBAT=11.91 V (USB only: near 0), IS=0 mV (DEN off) | IN=0,0,0 mV
+PCA9555 @0x20: PASS OUT=0x2000 CFG=0x0000 PIN=0x2000
+LSM6DS3TR-C @0x6A: WHO=0x6A (expected 0x6A), init=PASS
+IMU: temp=24.3 C accel=0.011,0.018,1.025 g gyro=0.74,-0.49,-0.16 dps
+Requested mode: USB only; LED power/DATA, DEN and sensor 5V OFF; CAN silent; HOLD LOW.
+
+L8 v3 USB diagnostic | uptime=7s | reset=0
+ESP32: ESP32-S3 rev=0 cores=2 | flash=16 MB (expected 16)
+PSRAM: chip=2048 KB (expected 2048), capacity=PASS, usable=2045 KB, 64 KB scratch test=PASS | heap=369240
+GPIO: HOLD=0 (must be 0), IGN=0, 5V_FAULT_N=1 | I2C SDA=1 SCL=1
+ADC: VBAT=11.92 V (USB only: near 0), IS=0 mV (DEN off) | IN=0,0,0 mV
+PCA9555 @0x20: PASS OUT=0x2000 CFG=0x0000 PIN=0x2000
+LSM6DS3TR-C @0x6A: WHO=0x6A (expected 0x6A), init=PASS
+IMU: temp=24.3 C accel=0.010,0.018,1.024 g gyro=0.70,-0.58,-0.19 dps
+Requested mode: USB only; LED power/DATA, DEN and sensor 5V OFF; CAN silent; HOLD LOW.
+
+L8 v3 USB diagnostic | uptime=9s | reset=0
+ESP32: ESP32-S3 rev=0 cores=2 | flash=16 MB (expected 16)
+PSRAM: chip=2048 KB (expected 2048), capacity=PASS, usable=2045 KB, 64 KB scratch test=PASS | heap=369240
+GPIO: HOLD=0 (must be 0), IGN=0, 5V_FAULT_N=1 | I2C SDA=1 SCL=1
+ADC: VBAT=11.92 V (USB only: near 0), IS=0 mV (DEN off) | IN=0,0,0 mV
+PCA9555 @0x20: PASS OUT=0x2000 CFG=0x0000 PIN=0x2000
+LSM6DS3TR-C @0x6A: WHO=0x6A (expected 0x6A), init=PASS
+IMU: temp=24.3 C accel=0.010,0.018,1.025 g gyro=0.75,-0.47,-0.17 dps
+Requested mode: USB only; LED power/DATA, DEN and sensor 5V OFF; CAN silent; HOLD LOW.
+
+L8 v3 USB diagnostic | uptime=11s | reset=0
+ESP32: ESP32-S3 rev=0 cores=2 | flash=16 MB (expected 16)
+PSRAM: chip=2048 KB (expected 2048), capacity=PASS, usable=2045 KB, 64 KB scratch test=PASS | heap=369240
+GPIO: HOLD=0 (must be 0), IGN=0, 5V_FAULT_N=1 | I2C SDA=1 SCL=1
+ADC: VBAT=11.92 V (USB only: near 0), IS=0 mV (DEN off) | IN=0,0,0 mV
+PCA9555 @0x20: PASS OUT=0x2000 CFG=0x0000 PIN=0x2000
+LSM6DS3TR-C @0x6A: WHO=0x6A (expected 0x6A), init=PASS
+IMU: temp=24.3 C accel=0.010,0.017,1.025 g gyro=0.75,-0.47,-0.19 dps
+Requested mode: USB only; LED power/DATA, DEN and sensor 5V OFF; CAN silent; HOLD LOW.
+
+L8 v3 USB diagnostic | uptime=13s | reset=0
+ESP32: ESP32-S3 rev=0 cores=2 | flash=16 MB (expected 16)
+PSRAM: chip=2048 KB (expected 2048), capacity=PASS, usable=2045 KB, 64 KB scratch test=PASS | heap=369240
+GPIO: HOLD=0 (must be 0), IGN=0, 5V_FAULT_N=1 | I2C SDA=1 SCL=1
+ADC: VBAT=11.92 V (USB only: near 0), IS=0 mV (DEN off) | IN=0,0,0 mV
+PCA9555 @0x20: PASS OUT=0x2000 CFG=0x0000 PIN=0x2000
+LSM6DS3TR-C @0x6A: WHO=0x6A (expected 0x6A), init=PASS
+IMU: temp=24.3 C accel=0.010,0.018,1.025 g gyro=0.74,-0.47,-0.19 dps
+Requested mode: USB only; LED power/DATA, DEN and sensor 5V OFF; CAN silent; HOLD LOW.
+
+L8 v3 USB diagnostic | uptime=15s | reset=0
+ESP32: ESP32-S3 rev=0 cores=2 | flash=16 MB (expected 16)
+PSRAM: chip=2048 KB (expected 2048), capacity=PASS, usable=2045 KB, 64 KB scratch test=PASS | heap=369240
+GPIO: HOLD=0 (must be 0), IGN=0, 5V_FAULT_N=1 | I2C SDA=1 SCL=1
+ADC: VBAT=11.92 V (USB only: near 0), IS=0 mV (DEN off) | IN=0,0,0 mV
+PCA9555 @0x20: PASS OUT=0x2000 CFG=0x0000 PIN=0x2000
+LSM6DS3TR-C @0x6A: WHO=0x6A (expected 0x6A), init=PASS
+IMU: temp=24.3 C accel=0.011,0.017,1.025 g gyro=0.74,-0.46,-0.21 dps
+Requested mode: USB only; LED power/DATA, DEN and sensor 5V OFF; CAN silent; HOLD LOW.
+
+L8 v3 USB diagnostic | uptime=17s | reset=0
+ESP32: ESP32-S3 rev=0 cores=2 | flash=16 MB (expected 16)
+PSRAM: chip=2048 KB (expected 2048), capacity=PASS, usable=2045 KB, 64 KB scratch test=PASS | heap=369240
+GPIO: HOLD=0 (must be 0), IGN=0, 5V_FAULT_N=1 | I2C SDA=1 SCL=1
+ADC: VBAT=11.91 V (USB only: near 0), IS=0 mV (DEN off) | IN=0,0,0 mV
+PCA9555 @0x20: PASS OUT=0x2000 CFG=0x0000 PIN=0x2000
+LSM6DS3TR-C @0x6A: WHO=0x6A (expected 0x6A), init=PASS
+IMU: temp=24.3 C accel=0.008,0.017,1.024 g gyro=0.74,-0.54,-0.19 dps
+Requested mode: USB only; LED power/DATA, DEN and sensor 5V OFF; CAN silent; HOLD LOW.
+
+L8 v3 USB diagnostic | uptime=19s | reset=0
+ESP32: ESP32-S3 rev=0 cores=2 | flash=16 MB (expected 16)
+PSRAM: chip=2048 KB (expected 2048), capacity=PASS, usable=2045 KB, 64 KB scratch test=PASS | heap=369240
+GPIO: HOLD=0 (must be 0), IGN=0, 5V_FAULT_N=1 | I2C SDA=1 SCL=1
+ADC: VBAT=11.92 V (USB only: near 0), IS=0 mV (DEN off) | IN=0,0,0 mV
+PCA9555 @0x20: PASS OUT=0x2000 CFG=0x0000 PIN=0x2000
+LSM6DS3TR-C @0x6A: WHO=0x6A (expected 0x6A), init=PASS
+IMU: temp=24.3 C accel=0.011,0.017,1.025 g gyro=0.74,-0.49,-0.11 dps
+Requested mode: USB only; LED power/DATA, DEN and sensor 5V OFF; CAN silent; HOLD LOW.

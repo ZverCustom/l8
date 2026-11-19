@@ -1,5 +1,6 @@
 #include "imu.h"
 #include <Wire.h>
+#include "board/board.h"
 #include "pins/pins.h"
 #include "settings/settings.h"
 #include "system/system.h"
@@ -15,26 +16,9 @@ const unsigned long IMU_INTERVAL = 20;     // 50 Hz
 const unsigned long IMU_RETRY = 5000;      // re-probe when not found
 const float LPF = 0.2f;                    // simple low-pass
 
-static bool writeReg(uint8_t reg, uint8_t val) {
-    Wire.beginTransmission(addr);
-    Wire.write(reg);
-    Wire.write(val);
-    return Wire.endTransmission() == 0;
-}
-
-static bool readRegs(uint8_t reg, uint8_t* buf, uint8_t len) {
-    Wire.beginTransmission(addr);
-    Wire.write(reg);
-    if (Wire.endTransmission(false) != 0) return false;
-    if (Wire.requestFrom(addr, len) != len) return false;
-    for (uint8_t i = 0; i < len; i++) buf[i] = Wire.read();
-    return true;
-}
-
-static bool ack(uint8_t a) {
-    Wire.beginTransmission(a);
-    return Wire.endTransmission() == 0;
-}
+static bool writeReg(uint8_t reg,uint8_t val) { return boardWrite(addr,reg,val); }
+static bool readRegs(uint8_t reg,uint8_t* buf,uint8_t len) { return boardRead(addr,reg,buf,len); }
+static bool ack(uint8_t a) { uint8_t who=0; return boardRead(a,0x0F,&who,1) && who==0x6A; }
 
 static bool tryInit() {
     addr = 0;
@@ -63,13 +47,6 @@ static bool tryInit() {
 }
 
 void imuSetup() {
-    pinMode(IMU_SDA_PIN, INPUT_PULLUP);
-    pinMode(IMU_SCL_PIN, INPUT_PULLUP);
-    delay(5);
-    Serial.printf("I2C idle levels: SDA=%d SCL=%d\n", digitalRead(IMU_SDA_PIN), digitalRead(IMU_SCL_PIN));
-    Wire.begin(IMU_SDA_PIN, IMU_SCL_PIN, 100000);
-    Wire.setTimeOut(5);
-    delay(50);
     imu.ok = tryInit();
     lastInitTry = millis();
     if (!imu.ok) Serial.println("LSM6DS3TR-C not found, will retry");

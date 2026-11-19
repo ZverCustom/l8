@@ -4,12 +4,13 @@
 #include "vehicle/vehicle.h"
 #include "imu/imu.h"
 #include "power/power.h"
+#include "board/board.h"
 
-const int ledPins[NUM_STRIPS] = {LED_PIN_1, LED_PIN_2, LED_PIN_3, LED_PIN_4, LED_PIN_5, LED_PIN_6};
+const int ledPins[NUM_STRIPS] = {LED_PIN_1, LED_PIN_2, LED_PIN_3, LED_PIN_4, LED_PIN_5, LED_PIN_6, LED_PIN_7, LED_PIN_8};
 
 CanSettings can_setting = {2000, 7000, 100, 100};
 StripSettings stripSettings[NUM_STRIPS] = {};
-int numLedsPerStrip[NUM_STRIPS] = {276, 194, 94, 94, 94, 94};
+int numLedsPerStrip[NUM_STRIPS] = {60,60,60,60,60,60,60,60};
 
 extern OBD2 obd2;
 
@@ -61,6 +62,8 @@ void initializeLEDStrips() {
             case LED_PIN_4: controllers[i] = &FastLED.addLeds<WS2812B, LED_PIN_4, RGB>(out[i], numLedsPerStrip[i]); break;
             case LED_PIN_5: controllers[i] = &FastLED.addLeds<WS2812B, LED_PIN_5, RGB>(out[i], numLedsPerStrip[i]); break;
             case LED_PIN_6: controllers[i] = &FastLED.addLeds<WS2812B, LED_PIN_6, RGB>(out[i], numLedsPerStrip[i]); break;
+            case LED_PIN_7: controllers[i] = &FastLED.addLeds<WS2812B, LED_PIN_7, RGB>(out[i], numLedsPerStrip[i]); break;
+            case LED_PIN_8: controllers[i] = &FastLED.addLeds<WS2812B, LED_PIN_8, RGB>(out[i], numLedsPerStrip[i]); break;
         }
         init(i);
     }
@@ -250,6 +253,7 @@ static float scaleFraction(int source) {
         case 2:  return vehicle.throttle / 100.0f;
         case 3:  return drive.maxLateralG > 0 ? imuLateralG() / drive.maxLateralG : 0;
         case 4:  return drive.maxYawRate > 0 ? imuYawRate() / drive.maxYawRate : 0;
+        case 5: case 6: case 7: return powerSnapshot().inputValue[source-5];
         default: {
             int span = can_setting.maxRPM - can_setting.minRPM;
             if (span <= 0) return 0;
@@ -276,7 +280,7 @@ void rpmLevel(int s) {
 
     fill_solid(leds[s], n, CRGB::Black);
     float frac = scaleFraction(st.scaleSource);
-    bool signedSource = st.scaleSource >= 3;
+    bool signedSource = st.scaleSource == 3 || st.scaleSource == 4;
 
     if (st.bottom) {
         // grow from the middle LED outwards
@@ -387,14 +391,19 @@ void runAnimations() {
 
     int brightness = can_setting.brightess;
     // no data into unpowered strips (latched or master off)
-    bool blackout = !drive.masterOn || !frameShown || !power.on;
+    bool blackout = !drive.masterOn || !frameShown || !powerSnapshot().on;
     if (!blackout && !engineOn()) {
         if (drive.engineOff == 2) blackout = true;
         else if (drive.engineOff == 1) brightness = brightness * constrain(drive.engineOffDim, 0, 100) / 100;
     }
 
     for (int i = 0; i < NUM_STRIPS; i++) {
-        if (blackout) {
+        auto channelState = powerSnapshot().channels[i];
+        static bool wasOn[NUM_STRIPS] = {};
+        bool dataEnabled = channelState.on && (boardDataMask() & (1u << i));
+        bool firstPoweredFrame = dataEnabled && !wasOn[i];
+        wasOn[i] = dataEnabled;
+        if (blackout || !dataEnabled || firstPoweredFrame) {
             fill_solid(out[i], numLedsPerStrip[i], CRGB::Black);
             continue;
         }
@@ -411,35 +420,34 @@ void runAnimations() {
 // frameMutex for the whole frame; a writer takes it (blocking until the frame ends) and
 // keeps it until resume, so no race window between check and show().
 static SemaphoreHandle_t frameMutex = nullptr;
-static volatile bool pausedFlag = false;
+static volatile unsigned pauseDepth = 0;
 
 static void ensureMutex() {
-    if (!frameMutex) frameMutex = xSemaphoreCreateMutex();
+    if (!frameMutex) frameMutex = xSemaphoreCreateRecursiveMutex();
 }
 
 void ledsPause() {
     ensureMutex();
-    if (pausedFlag) return;
-    xSemaphoreTake(frameMutex, portMAX_DELAY);
-    pausedFlag = true;
+    xSemaphoreTakeRecursive(frameMutex, portMAX_DELAY);
+    ++pauseDepth;
 }
 
 void ledsResume() {
-    if (!pausedFlag) return;
-    pausedFlag = false;
-    xSemaphoreGive(frameMutex);
+    if (!pauseDepth) return;
+    --pauseDepth;
+    xSemaphoreGiveRecursive(frameMutex);
 }
 
 bool ledsPaused() {
-    return pausedFlag;
+    return pauseDepth != 0;
 }
 
 static void ledTask(void*) {
     ensureMutex();
     for (;;) {
-        xSemaphoreTake(frameMutex, portMAX_DELAY);
+        xSemaphoreTakeRecursive(frameMutex, portMAX_DELAY);
         runAnimations();
-        xSemaphoreGive(frameMutex);
+        xSemaphoreGiveRecursive(frameMutex);
         vTaskDelay(1);
     }
 }

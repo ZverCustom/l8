@@ -1,24 +1,22 @@
-#ifndef POWER_H
-#define POWER_H
-
+#pragma once
 #include <Arduino.h>
-
-// LED supply switch (BTS7002) with a software latch, VBAT and the status LED
+struct ChannelPower { float amps=0, isVolts=0; bool on=false; uint8_t fault=0; uint32_t sampleAt=0; };
 struct PowerState {
-    float vbat = 0;      // V, smoothed
-    float ledAmps = 0;   // A, smoothed
-    float isVolts = 0;   // raw IS voltage, last sample
-    bool on = false;     // switch is driven on
-    bool latched = false;
-    String reason;       // why the latch tripped
+    float vbat=0, ledAmps=0, isVolts=0;
+    bool inhibited=false;
+    bool on=false, latched=false, ign=false, hold=false, ioOk=false, ioLatched=false;
+    bool sensorOn=false, sensorFault=false;
+    ChannelPower channels[8];
+    float inputMv[3]={}, inputValue[3]={};
+    uint32_t sampleAt=0;
 };
-
-extern PowerState power;
-
-void powerBegin();       // switch off, status LED on until the first powerTick
+extern PowerState power; // main-loop snapshot; use powerSnapshot() from other tasks
+void powerBegin();
 void powerTick();
-void powerSampleAdc();   // called by the LED task between frames: ADC reads stall the RMT refill interrupt
-void powerResetLatch();
+void powerSampleAdc(); // kept as no-op: ADC runs in the safety task on core 0
+void powerResetLatch(int channel=-1);
+void powerInhibit(bool inhibit);
+void powerCanSilent(bool silent);
+PowerState powerSnapshot();
 String powerStatusString();
-
-#endif
+const char* powerFaultName(uint8_t fault);

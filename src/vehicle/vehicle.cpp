@@ -102,17 +102,21 @@ void vehicleSetMode(int mode) {
 
 // BMW E46 / MS43 PT-CAN, 500 kbit
 static void decodeBmw(const twai_message_t& f) {
+    if (f.extd || f.rtr) return;
     switch (f.identifier) {
         case 0x316:  // DME1
+            if(f.data_length_code<4) return;
             vehicle.rpm = ((f.data[3] << 8) | f.data[2]) / 6.4;
             vehicle.lastUpdate = millis();
             break;
         case 0x329:  // DME2
+            if(f.data_length_code<6) return;
             vehicle.temp = f.data[1] * 0.75 - 48;
             vehicle.throttle = (uint16_t)f.data[5] * 100 / 254;
             vehicle.lastUpdate = millis();
             break;
         case 0x153:  // ASC1
+            if(f.data_length_code<3) return;
             vehicle.speed = ((f.data[2] << 8) | f.data[1]) / 128;
             vehicle.lastUpdate = millis();
             break;
@@ -123,7 +127,7 @@ static void sniffFrame(const twai_message_t& f) {
     unsigned long now = millis();
     SniffEntry* e = nullptr;
     for (int i = 0; i < sniffUsed; i++) {
-        if (sniff[i].id == f.identifier) { e = &sniff[i]; break; }
+        if (sniff[i].id == f.identifier && sniff[i].extd == bool(f.extd)) { e = &sniff[i]; break; }
     }
     if (!e) {
         if (sniffUsed >= SNIFF_MAX) return;

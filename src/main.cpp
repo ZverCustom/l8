@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "board/board.h"
 #include "settings/settings.h"
 #include "led_control/led_control.h"
 #include "obd2/obd2.h"
@@ -15,12 +16,18 @@ CANBus canBus;
 OBD2 obd2;
 
 void setup() {
+    boardBegin();
+    // USB hosts send a complete JSON configuration in one burst. The Arduino
+    // default 256-byte RX queue otherwise drops its tail (including newline).
+    Serial.setRxBufferSize(32768);
     Serial.begin(115200);
+    Serial.setTxTimeoutMs(100);
     delay(2000);
     Serial.println("System initializing...");
 
-    powerBegin();
     settingsBegin();
+    powerInhibit(true);
+    powerBegin();
     sysBegin();
     initializeLEDStrips();
 
@@ -28,6 +35,7 @@ void setup() {
     canBus.begin(CAN_RX_PIN, CAN_TX_PIN, CAN_STB_PIN, timingConfig, canMode != CAN_MODE_OBD2);
     obd2.begin(canBus);
     vehicleSetup(canBus, obd2);
+    vehicleSetBitrate(canBitrateSel);
     klineBegin();
 
     netBegin();
@@ -38,6 +46,7 @@ void setup() {
 }
 
 void loop() {
+    powerTick();
     netTick();
     settingsTick();
     updateHub();

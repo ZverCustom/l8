@@ -2,9 +2,9 @@
 #define CONFIG_H
 
 // Настройки Wi-Fi
-#define AP_SSID "ZverCustomLed"      // Имя точки доступа
+#define AP_SSID "ZVER-L8"      // Имя точки доступа
 #define AP_PASSWORD "qwerty12345"  // Пароль для точки доступа
-#define NUM_STRIPS 6
+#define NUM_STRIPS 8
 
 // Default STA network, used until changed in the hub.
 // Put real values into src/config/secrets.h (gitignored), see secrets.example.h

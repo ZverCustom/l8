@@ -1,0 +1,53 @@
+{
+  "date": "2026-11-20",
+  "board": "L8 PCB v3",
+  "chip": "ESP32-S3 revision v0.2 (esptool)",
+  "mac": "10:bd:a3:5f:51:14",
+  "supply": "USB only; no external 12 V or IGN",
+  "firmware": "diagnostics/v3-usb (not full L8 application)",
+  "firmware_sha256": "db6dc4d28b3b0f458e6a97dbd51b67033e1507d561a61638b6d36dee6ead7a39",
+  "result": "PASS within USB diagnostic scope",
+  "reports": 10,
+  "uptime_seconds": [
+    1,
+    3,
+    5,
+    7,
+    9,
+    11,
+    13,
+    15,
+    17,
+    19
+  ],
+  "flash_bytes": 16777216,
+  "psram_chip_bytes": 2097152,
+  "psram_usable_kib": 2045,
+  "psram_scratch_test_bytes": 65536,
+  "pca9555": {
+    "address": "0x20",
+    "output": "0x2000",
+    "config": "0x0000",
+    "physical_pins": "0x2000"
+  },
+  "imu": {
+    "address": "0x6A",
+    "who_am_i": "0x6A",
+    "fresh_samples": 10
+  },
+  "hold": 0,
+  "ign": 0,
+  "sensor_5v_fault_n": 1,
+  "not_tested": [
+    "full PSRAM range",
+    "12 V buck/power path",
+    "IGN/HOLD power sequencing",
+    "LED outputs and current sensing under load",
+    "CAN",
+    "K-line",
+    "Wi-Fi/OTA"
+  ],
+  "log": "2026-11-20-usb.log",
+  "log_sha256": "8aa2d7c9089bbebb1c524e3da0a4bbd1b8dbe70f3ea96c4a084b69076d54597d",
+  "diagnostic_fix": "Read physical PSRAM capacity via esp_spiram_get_size; Arduino getPsramSize reports heap size minus allocator overhead. Scratch test now runs independently of capacity check."
+}
