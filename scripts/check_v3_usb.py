@@ -29,7 +29,7 @@ try:
  check('healthy safe boot',state['ioOk'] and not state['ioFault'] and state['imu']['ok'] and state['otaConfirmed'] and not state['master'] and all(not c['on'] and not c['data'] for c in state['channels']))
  original=cmd({'cmd':'get_config'})
  check('safe configuration',not original['global']['autoStart'] and not original['global']['sensor5v'])
- check('schema 3 / eight strips / three inputs',original['schema']==3 and len(original['strips'])==8 and len(original['inputs'])==3)
+ check('schema 4 / eight strips / three inputs',original['schema']==4 and len(original['strips'])==8 and len(original['inputs'])==3)
  check('Wi-Fi password redacted',original['network']['password']=='' and original['network']['keepPassword'])
  for name,mutate in [
   ('wrong schema',lambda c:c.update(schema=2)),

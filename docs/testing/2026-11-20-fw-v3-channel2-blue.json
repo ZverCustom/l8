@@ -1,0 +1,296 @@
+{
+  "color": "#203FBC",
+  "globalBrightness": 30,
+  "channelBrightness": 100,
+  "userConfirmedBlue": true,
+  "samples": [
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 9368,
+      "vbat": 11.93009949,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.581333339,
+        "fault": "",
+        "isVolts": 0.128000006,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    },
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 9581,
+      "vbat": 11.93009949,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.576791704,
+        "fault": "",
+        "isVolts": 0.127000004,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    },
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 9798,
+      "vbat": 11.91870022,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.567708313,
+        "fault": "",
+        "isVolts": 0.125,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    },
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 10018,
+      "vbat": 11.91870022,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.567708313,
+        "fault": "",
+        "isVolts": 0.125,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    },
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 10232,
+      "vbat": 11.93009949,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.563166678,
+        "fault": "",
+        "isVolts": 0.123999998,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    },
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 10447,
+      "vbat": 11.91870022,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.549541652,
+        "fault": "",
+        "isVolts": 0.120999999,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    },
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 10666,
+      "vbat": 11.91870022,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.581333339,
+        "fault": "",
+        "isVolts": 0.128000006,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    },
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 10878,
+      "vbat": 11.93009949,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.567708313,
+        "fault": "",
+        "isVolts": 0.125,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    },
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 11095,
+      "vbat": 11.93009949,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.567708313,
+        "fault": "",
+        "isVolts": 0.125,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    },
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 11310,
+      "vbat": 11.93009949,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.540458322,
+        "fault": "",
+        "isVolts": 0.119000003,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    },
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 11529,
+      "vbat": 11.93009949,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.581333339,
+        "fault": "",
+        "isVolts": 0.128000006,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    },
+    {
+      "firmware": "0.3.2-dev",
+      "uptimeMs": 11743,
+      "vbat": 11.93009949,
+      "master": true,
+      "ign": false,
+      "hold": true,
+      "ioOk": true,
+      "ioFault": false,
+      "channel2": {
+        "on": true,
+        "amps": 0.563166678,
+        "fault": "",
+        "isVolts": 0.123999998,
+        "data": true,
+        "legacyIndex": 0,
+        "pins": [
+          2,
+          11,
+          27
+        ]
+      },
+      "otherChannelsOff": true
+    }
+  ]
+}

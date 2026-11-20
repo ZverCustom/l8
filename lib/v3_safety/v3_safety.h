@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <power_latch.h>
+#include "channel_map.h"
 namespace v3 {
 constexpr uint16_t SAFE = 0x2000; // only CAN_S high
 inline float currentAmps(float volts) { return volts * 5450.0f / 1200.0f; }

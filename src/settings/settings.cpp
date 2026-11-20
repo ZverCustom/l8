@@ -3,6 +3,7 @@
 #include "net/net.h"
 #include "vehicle/vehicle.h"
 #include "power/power.h"
+#include <channel_map.h>
 SavedData savedData;
 DriveSettings& drive=savedData.drive;
 static bool healthy=false, pending=false;
@@ -46,7 +47,7 @@ static void encodeStrip(JsonObject o,const StripSettings& s,int count) {
 }
 static void encodeCan(JsonObject o,const CanSettings& c) { o["minRpm"]=c.minRPM; o["maxRpm"]=c.maxRPM; o["speed"]=c.speed; o["brightness"]=c.brightess; }
 String settingsJson(bool secrets) {
-    pullLive(); DynamicJsonDocument doc(24576); doc["schema"]=3;
+    pullLive(); DynamicJsonDocument doc(24576); doc["schema"]=4;
     auto g=doc.createNestedObject("global"); encodeCan(g,can_setting);
     g["autoStart"]=savedData.autoStart; g["allowWithoutIgn"]=savedData.allowWithoutIgn; g["sensor5v"]=savedData.sensor5v;
     g["shiftRpm"]=drive.shiftRPM; g["shiftColor"]=drive.shiftColor; g["engineOff"]=drive.engineOff;
@@ -80,7 +81,7 @@ bool settingsApply(JsonVariantConst value,String& error) {
     auto o=value.as<JsonObjectConst>(); auto g=o["global"].as<JsonObjectConst>();
     SavedData next=savedData;
     auto fail=[&](const char* text) { error=text; return false; };
-    if(!integer(o["schema"],3,3)) return fail("Expected config schema 3");
+    if(!integer(o["schema"],3,4)) return fail("Expected config schema 3 or 4");
     if(!decodeCan(g,next.can_setting)) return fail("Invalid global RPM/brightness/speed");
     for(auto key:{"autoStart","allowWithoutIgn","sensor5v","cutPowerEngineOff"}) if(!g[key].is<bool>()) return fail("Invalid global switch");
     if(!integer(g["shiftRpm"],0,16000)||!integer(g["shiftColor"],0,0xffffff)||!integer(g["engineOff"],0,2)||!integer(g["dim"],0,100)||!integer(g["powerLimitMa"],0,40000)||!integer(g["maxSpeed"],1,400)||!number(g["maxG"],.1,10)||!number(g["maxYaw"],1,2000)||!integer(g["lateralAxis"],0,5)||!integer(g["yawAxis"],0,5)) return fail("Invalid global setting");
@@ -105,6 +106,13 @@ bool settingsApply(JsonVariantConst value,String& error) {
         if(!decodeCan(p["global"],next.presets[i].can)||!p["strips"].is<JsonArrayConst>()||p["strips"].size()!=8) return fail("Invalid preset contents");
         for(int j=0;j<8;++j) if(!decodeStrip(p["strips"][j],next.presets[i].strips[j],next.presets[i].numLeds[j])) return fail("Invalid preset strip");
     }
+    // Schema 3 used schematic order. Preserve settings and protection limits on
+    // their physical outputs when loading old files, imports or browser tabs.
+    if(o["schema"].as<int>()==3) {
+        v3::migrateLegacyChannels(next.stripSettings); v3::migrateLegacyChannels(next.numLeds);
+        v3::migrateLegacyChannels(next.channelMaxAmps); v3::migrateLegacyChannels(next.channelCal);
+        for(auto& p:next.presets) if(p.used) { v3::migrateLegacyChannels(p.strips); v3::migrateLegacyChannels(p.numLeds); }
+    }
     // Commit only after validating every field; import always disarms outputs.
     drive.masterOn=false; powerTick(); powerInhibit(true); ledsPause();
     savedData=next; pushLive(); requestLedReinit(); ledsResume(); powerTick(); powerInhibit(false);
@@ -113,7 +121,9 @@ bool settingsApply(JsonVariantConst value,String& error) {
 static bool readConfig(const char* path) {
     File file=LittleFS.open(path,"r"); if(!file||file.size()>24000) return false;
     DynamicJsonDocument doc(24576); auto result=deserializeJson(doc,file); file.close();
-    String error; return !result && settingsApply(doc.as<JsonVariantConst>(),error);
+    String error; bool ok=!result && settingsApply(doc.as<JsonVariantConst>(),error);
+    if(ok && doc["schema"].as<int>()==3) settingsSave(); // write schema 4 atomically after startup
+    return ok;
 }
 void settingsBegin() {
     defaults(); pushLive();

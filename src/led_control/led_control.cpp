@@ -5,8 +5,9 @@
 #include "imu/imu.h"
 #include "power/power.h"
 #include "board/board.h"
+#include <channel_map.h>
 
-const int ledPins[NUM_STRIPS] = {LED_PIN_1, LED_PIN_2, LED_PIN_3, LED_PIN_4, LED_PIN_5, LED_PIN_6, LED_PIN_7, LED_PIN_8};
+const int ledPins[NUM_STRIPS] = {v3::dataPin(0), v3::dataPin(1), v3::dataPin(2), v3::dataPin(3), v3::dataPin(4), v3::dataPin(5), v3::dataPin(6), v3::dataPin(7)};
 
 CanSettings can_setting = {2000, 7000, 100, 100};
 StripSettings stripSettings[NUM_STRIPS] = {};
@@ -400,7 +401,7 @@ void runAnimations() {
     for (int i = 0; i < NUM_STRIPS; i++) {
         auto channelState = powerSnapshot().channels[i];
         static bool wasOn[NUM_STRIPS] = {};
-        bool dataEnabled = channelState.on && (boardDataMask() & (1u << i));
+        bool dataEnabled = channelState.on && (boardDataMask() & v3::channelMask(i));
         bool firstPoweredFrame = dataEnabled && !wasOn[i];
         wasOn[i] = dataEnabled;
         if (blackout || !dataEnabled || firstPoweredFrame) {

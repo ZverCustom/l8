@@ -12,6 +12,7 @@
 #include "vehicle/vehicle.h"
 #include "system/system.h"
 #include "board/board.h"
+#include <channel_map.h>
 #include "l8_ui.h"
 static WebServer server(80);
 static String token, serialLine;
@@ -32,7 +33,7 @@ String hubStatusJson() {
     d["canStatus"]=canStatusString(); d["canBitrate"]=canBitrateString(); d["dataFresh"]=vehicleDataFresh();
     d["rpm"]=vehicle.rpm; d["speed"]=vehicle.speed; d["temp"]=vehicle.temp; d["throttle"]=vehicle.throttle;
     auto channels=d.createNestedArray("channels");
-    for(int i=0;i<8;++i) { auto c=channels.createNestedObject(); c["on"]=p.channels[i].on; c["amps"]=p.channels[i].amps; c["fault"]=powerFaultName(p.channels[i].fault); c["isVolts"]=p.channels[i].isVolts; c["data"]=bool(boardDataMask()&(1u<<i)); }
+    for(int i=0;i<8;++i) { auto c=channels.createNestedObject(); c["on"]=p.channels[i].on; c["amps"]=p.channels[i].amps; c["fault"]=powerFaultName(p.channels[i].fault); c["isVolts"]=p.channels[i].isVolts; c["data"]=bool(boardDataMask()&v3::channelMask(i)); c["legacyIndex"]=v3::hardwareChannel(i); auto pins=c.createNestedArray("pins"); pins.add(v3::CHANNELS[i].power); pins.add(v3::CHANNELS[i].data); pins.add(v3::CHANNELS[i].ground); }
     auto inputs=d.createNestedArray("inputs"); for(int i=0;i<3;++i) { auto x=inputs.createNestedObject(); x["mv"]=p.inputMv[i]; x["volts"]=p.inputMv[i]*.0053f; x["value"]=p.inputValue[i]; }
     auto m=d.createNestedObject("imu"); m["ok"]=imu.ok; m["ax"]=imu.ax; m["ay"]=imu.ay; m["az"]=imu.az; m["gx"]=imu.gx; m["gy"]=imu.gy; m["gz"]=imu.gz; m["temp"]=imu.temp; m["lateralG"]=imuLateralG(); m["yaw"]=imuYawRate();
     d["otaConfirmed"]=bootConfirmed;

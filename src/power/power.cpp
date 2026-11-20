@@ -71,12 +71,12 @@ static void safetyTask(void*) {
             bool on=s.ledPowerAllowed && cfg.master && cfg.enabled[i] && !s.channels[i].fault;
             if(on && !s.channels[i].on) { enabledAt[i]=now; latches[i].reset(); }
             s.channels[i].on=on;
-            if(on) mask|=1u<<i;
+            if(on) mask|=v3::channelMask(i);
             else { s.channels[i].amps=0; s.channels[i].isVolts=0; latches[i].reset(); }
         }
         // Disconnect before changing supply; newly enabled strips remain low for 3 ms.
         uint8_t data=mask;
-        for(int i=0;i<8;++i) if(now-enabledAt[i]<3) data&=~(1u<<i);
+        for(int i=0;i<8;++i) if(now-enabledAt[i]<3) data&=~v3::channelMask(i);
         boardDataMask(data);
         if(!digitalRead(SENSOR_FAULT_PIN) && s.sensorOn) s.sensorFault=true;
         s.sensorOn=allowed && cfg.sensor && !s.sensorFault;
@@ -89,7 +89,7 @@ static void safetyTask(void*) {
             if(!ch.on) { s.latched |= ch.fault!=0; continue; }
             // Break before make: only one DEN is ever high; allow 100 us settling
             // (datasheet max 60 us after DEN/DSEL in small-load mode).
-            ok=expWrite(2,base) && expWrite(2,base|v3::senseSelect(i));
+            ok=expWrite(2,base) && expWrite(2,base|v3::senseSelect(v3::hardwareChannel(i)));
             if(!ok) break;
             delayMicroseconds(100);
             ch.isVolts=analogReadMilliVolts(LED_ISENSE_PIN)/1000.f;
@@ -97,7 +97,7 @@ static void safetyTask(void*) {
             auto trip=latches[i].update(ch.sampleAt,ch.amps,ch.isVolts,cfg.maxAmps[i]);
             if(trip!=PowerLatch::NONE) {
                 ch.fault=trip==PowerLatch::FAULT ? 2 : 1; ch.on=false;
-                mask &= ~(1u<<i); base &= ~(1u<<i); boardDataMask(boardDataMask() & mask);
+                mask &= ~v3::channelMask(i); base &= ~v3::channelMask(i); boardDataMask(boardDataMask() & mask);
                 s.latched=true;
             }
             s.ledAmps+=ch.amps;

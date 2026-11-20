@@ -9,5 +9,5 @@ bool boardWrite(uint8_t address, uint8_t reg, uint8_t value);
 bool expWrite(uint8_t reg, uint16_t value);
 bool expRead(uint8_t reg, uint16_t& value);
 bool expSafeInit();
-void boardDataMask(uint8_t mask);
+void boardDataMask(uint8_t mask); // physical GPIO11..18 / PCA P00..P07 bits, not UI channel order
 uint8_t boardDataMask();

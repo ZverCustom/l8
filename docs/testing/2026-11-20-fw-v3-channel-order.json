@@ -1,0 +1,82 @@
+{
+  "passed": 25,
+  "checks": [
+    "Master OFF precondition",
+    "no automatic loads",
+    "schema 4 exported",
+    "flash migrated user settings without changing physical outputs",
+    "connector pins in order",
+    "legacy indexes match hardware",
+    "legacy config accepted",
+    "calibration follows output 65",
+    "calibration follows output 64",
+    "calibration follows output 69",
+    "calibration follows output 68",
+    "calibration follows output 67",
+    "calibration follows output 66",
+    "calibration follows output 71",
+    "calibration follows output 70",
+    "settings, limits and presets follow physical outputs",
+    "migration leaves outputs OFF",
+    "schema 4 accepted without another reorder",
+    "invalid legacy config rejected",
+    "invalid legacy config makes no partial changes",
+    "reboot command",
+    "schema 4 persists without repeated reorder",
+    "reboot keeps outputs OFF",
+    "restore user configuration",
+    "user configuration readback"
+  ],
+  "pins": [
+    [
+      1,
+      10,
+      26
+    ],
+    [
+      2,
+      11,
+      27
+    ],
+    [
+      3,
+      12,
+      28
+    ],
+    [
+      4,
+      13,
+      29
+    ],
+    [
+      6,
+      15,
+      31
+    ],
+    [
+      7,
+      16,
+      32
+    ],
+    [
+      8,
+      17,
+      33
+    ],
+    [
+      9,
+      25,
+      34
+    ]
+  ],
+  "legacyIndexes": [
+    1,
+    0,
+    5,
+    4,
+    3,
+    2,
+    7,
+    6
+  ]
+}

@@ -1,11 +1,14 @@
 """DriftAnalyser V1.0 (hardware: PCB v3) customer datasheet (RU) -> datasheet.html, PDF and page PNGs.
 
-Pinout from PCB/v3/gen/model.py (J1_PIN), enclosure sizes from enclosure/v3/enclosure_v3.py.
+User channels from lib/v3_safety/channel_map.h, checked against PCB/v3/gen/model.py.
+Enclosure sizes from enclosure/v3/enclosure_v3.py.
 Run with the enclosure venv (needs cadquery for the enclosure import):
     enclosure/.venv/bin/python PCB/v3/docs/datasheet/gen_datasheet.py
 """
 import base64
 import math
+import re
+from pathlib import Path
 import os
 import subprocess
 import sys
@@ -14,13 +17,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "PCB", "v3"))
 sys.path.insert(0, os.path.join(ROOT, "enclosure", "v3"))
-from gen.model import J1_PIN  # noqa: E402
+from gen.model import J1_PIN as HARDWARE_J1_PIN  # noqa: E402
+# User-facing channel names follow the firmware map; schematic net names remain unchanged.
+map_source = Path(ROOT, "lib/v3_safety/channel_map.h").read_text()
+channel_map = [tuple(map(int, m)) for m in re.findall(r"\{(\d+),(\d+),(\d+),(\d+)\}", map_source)]
+assert len(channel_map) == 8
+J1_PIN = {k: v for k, v in HARDWARE_J1_PIN.items() if not k.startswith("LED")}
+for channel, (power, data, ground, hardware) in enumerate(channel_map, 1):
+    for suffix, pin in (("12V", power), ("DO", data), ("GND", ground)):
+        assert int(HARDWARE_J1_PIN[f"LED{hardware + 1}_{suffix}"]) == pin
+        J1_PIN[f"LED{channel}_{suffix}"] = str(pin)
 import enclosure_v3 as E  # noqa: E402
 
 DOC = "ZVER-L8-TD-001"
-REV = "rev 0.3"
-DATE = "2026-10"
-STATUS = "предварительная"
+REV = "rev 0.4"
+DATE = "2026-11-20"
+STATUS = "предварительная · ПО 0.3.2"
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 HTML = os.path.join(HERE, "datasheet.html")
 PDF = os.path.join(HERE, "ZVER_L8_datasheet.pdf")
@@ -684,7 +696,7 @@ def page(n, body, cover=False):
 
 def cover():
     kf = [("8", "каналов лент"), ("5 А", "на канал"), ("~40 А", "суммарный ток лент"),
-          ("9–16 В", "питание, номинал 12 В"), ("≤1 мА", "ток покоя, IGN выкл."), ("34", "конт. J1, Superseal 1.0")]
+          ("12 В", "номинальное питание"), ("IGN", "зависимость лент настраивается"), ("34", "конт. J1, Superseal 1.0")]
     cells = "".join(f'<div><div class="v">{v}</div><div class="l">{lbl}</div></div>' for v, lbl in kf)
     return (f'<div class="cover"><div class="mast"><div class="k">ТЕХНИЧЕСКОЕ ОПИСАНИЕ · {DOC}</div>'
             f'<div class="nm">ZVER<i>L8</i></div>'
@@ -712,30 +724,30 @@ TE Superseal 1.0, 34 конт.: <span class="m">6437288-1</span> (блок), <sp
     pages.append(page(2, f"""
 <h2>Распиновка J1 <span>по номерам контактов</span></h2>
 <div class="two">{pin_list(range(1, 18))}{pin_list(range(18, 35))}</div>
-<h2>Каналы лент <span>три контакта на ленту</span></h2>
+<h2>Каналы лент <span>порядок в прошивке 0.3.2 и новее</span></h2>
 {strip_cards()}
 <h2>Жгут</h2>
 <p>Обжимать по номерам контактов, а не по положению или цвету провода. Каждая лента — три провода на
 фиксированных контактах: +12V в ряду 1, её GND в ряду 4 точно под ним, DATA в ряду 2 или 3.
 Провода +12V и GND одной ленты вести в одном кабеле. CAN High / CAN Low (18/19) — витая пара.
-Все 34 гнезда заняты, заглушки не нужны.</p>
+Номера каналов идут по силовым контактам: 1, 2, 3, 4, 6, 7, 8, 9. Контакт 5 — сигнальная масса.</p>
 """))
 
     pages.append(page(3, f"""
 <h2>Основные характеристики</h2>
 <table class="spec">
 <tr><td>Назначение</td><td>Контроллер 12 В адресных светодиодных лент: 8 каналов, CAN, K-line, датчик движения, 3 входа, Wi-Fi</td></tr>
-<tr><td>Напряжение питания</td><td>9–16 В (номинал 12 В); выдерживает пуск от 24 В и переполюсовку (идеальный диод)</td></tr>
+<tr><td>Напряжение питания</td><td>9–16,5 В для лент (номинал 12 В); защита входа от переполюсовки. Импульсные режимы требуют испытаний</td></tr>
 <tr><td>Выходы лент</td><td>8 каналов +12 В, включение каждого канала отдельно, до 5 А на канал (предел контакта Superseal); ток каждого канала измеряется</td></tr>
 <tr><td>Суммарный ток лент</td><td>до ~40 А</td></tr>
 <tr><td>Данные лент</td><td>8 линий DATA, уровень 5 В</td></tr>
-<tr><td>Ток покоя</td><td>≤ 1 мА при выключенном зажигании (IGN)</td></tr>
+<tr><td>Ток покоя</td><td>Автосон по IGN отключён; потребление работающего блока зависит от режима</td></tr>
 <tr><td>CAN</td><td>1 канал, 500 кбит/с или 1 Мбит/с (в настройках); терминатор 120 Ом — перемычка JP2 внутри корпуса</td></tr>
 <tr><td>K-line</td><td>1 линия; подтяжка 510 Ом к +12 В — перемычка JP1 внутри корпуса</td></tr>
 <tr><td>Входы</td><td>IN1–IN3: цифровые (на GND / на +12V) или аналоговые 0–16 В</td></tr>
 <tr><td>Питание датчиков</td><td>+5V датчиков ≈ 4,7 В, с ограничением тока</td></tr>
 <tr><td>Датчик движения</td><td>акселерометр + гироскоп (6 осей), встроенный</td></tr>
-<tr><td>Настройка</td><td>Wi-Fi (ESP32-S3), внешняя антенна SMA; обновление прошивки по воздуху. USB-C внутри корпуса — только для первой прошивки и восстановления (снять крышку)</td></tr>
+<tr><td>Настройка</td><td>Wi-Fi (ESP32-S3), внешняя антенна SMA; обновление прошивки по воздуху. USB-C внутри корпуса — прошивка, настройка и диагностика (снять крышку)</td></tr>
 <tr><td>Разъём</td><td>TE Superseal 1.0, 34 конт.: <span class="m">6437288-1</span>, ответная часть <span class="m">4-1437290-0</span></td></tr>
 <tr><td>Силовые клеммы</td><td>2 × Würth REDCUBE <span class="m">7461059</span>, внутренняя резьба M6</td></tr>
 <tr><td>Габариты</td><td>{fmt(E.X1 - E.X0)} × {fmt(E.Y1 - E.Y0)} мм, высота {fmt(E.HOOD_TOP)} мм; {fmt(E.X1 - E.X0 + 2 * E.EAR_L)} мм по крепёжным ушам (предварительно)</td></tr>
@@ -744,12 +756,13 @@ TE Superseal 1.0, 34 конт.: <span class="m">6437288-1</span> (блок), <sp
 <h2>Выходы лент</h2>
 <p>8 каналов. Каждый канал — свой ключ +12V (ряд 1), линия данных DATA (ряд 2 или 3) и GND (ряд 4, под
 своим +12V). Ток канала — до <b>5 А</b>: это предел контакта Superseal, а не ключа. Каналы включаются
-независимо, ток каждого канала измеряется. Линии DATA — логика 5 В, для адресных лент WS2812.</p>
+независимо, ток каждого канала измеряется. Линии DATA — логика 5 В, для совместимых адресных лент на 12 В, включая WS2815. Для лент нужен включённый Master.</p>
 
 <h2>Зажигание IGN</h2>
-<p>Контакт <span class="m">24</span>. +12 В на IGN будит блок. Когда IGN снимается, ленты выключаются и блок засыпает;
-ток покоя в этом состоянии ≤ 1 мА. IGN подключать к цепи, на которой +12 В есть только при включённом
-зажигании, а не к постоянному +12 В.</p>
+<p>Контакт <span class="m">24</span>. В «Система» настройка «Ленты работают без IGN» разрешает
+работу лент без зажигания. При снятии IGN запущенный контроллер продолжает работать от 12 В.
+Для холодного запуска платы v3 и после сброса нужен USB или IGN: от одних 12 В блок сам не стартует.
+USB позволяет настроить блок без 12 В, но не питает ленты.</p>
 """))
 
     pages.append(page(4, f"""
@@ -810,8 +823,14 @@ TE Superseal 1.0, 34 конт.: <span class="m">6437288-1</span> (блок), <sp
 
     pages.append(page(6, """
 <h2>Wi-Fi</h2>
-<p>Настройка — по Wi-Fi через веб-интерфейс (параметры точки доступа см. в прошивке).
-Антенна Wi-Fi — внешняя, разъём SMA на боковой стенке корпуса.</p>
+<p>В домашней сети: <span class="m">http://zver-l8.local</span>. Если сеть недоступна,
+через 20 с появляется точка <b>ZVER-L8</b>, пароль <span class="m">qwerty12345</span>,
+адрес <span class="m">http://192.168.4.1</span>. Антенна — внешняя, разъём SMA.</p>
+<p>В «Каналы» выберите канал по указанным контактам +12 В / DATA / GND, задайте цвет и нажмите
+«Сохранить». Сохранение выключает Master: для свечения включите его снова. Порядок цветов RGB / GRB
+выбирается под ленту; проверенная WS2815 использует RGB.</p>
+<p>После обновления до 0.3.2 обновите страницу. Старые настройки и пресеты автоматически
+переносятся на прежние физические выходы; новые номера каналов приведены на странице 2.</p>
 
 <h2>Провода</h2>
 <p>Контакты разъёма: TE Superseal 1.0, контакт <b class="m">3-1447221-3</b> для провода 0,75–1,25 мм².</p>
@@ -819,7 +838,7 @@ TE Superseal 1.0, 34 конт.: <span class="m">6437288-1</span> (блок), <sp
 <table class="tbl wide">
 <tr><th>Цепь</th><th>Сечение</th><th class="nw">AWG</th></tr>
 <tr><td>+12V и GND лент (на контакт)</td><td>0,75–1,25 мм²</td><td class="nw m">18–16</td></tr>
-<tr><td>DATA, CAN, K-line, IGN, входы, +5V, GND сигнальная</td><td>0,5 мм²</td><td class="nw m">20–22</td></tr>
+<tr><td>DATA, CAN, K-line, IGN, входы, +5V, GND сигнальная</td><td>0,5 мм²</td><td class="nw m">20</td></tr>
 <tr><td>Силовые кабели на клеммы +12V / GND (~40 А)</td><td>по току ~40 А, наконечник M6</td><td class="nw m">8–6</td></tr>
 </table>
 <table class="tbl">
@@ -827,6 +846,7 @@ TE Superseal 1.0, 34 конт.: <span class="m">6437288-1</span> (блок), <sp
 <tr><td>Разъём на блоке</td><td class="m">TE 6437288-1</td></tr>
 <tr><td>Ответная часть</td><td class="m">TE 4-1437290-0</td></tr>
 <tr><td>Контакт 0,75–1,25 мм²</td><td class="m">TE 3-1447221-3</td></tr>
+<tr><td>Контакт 0,5 мм²</td><td class="m">TE 3-1447221-4</td></tr>
 <tr><td>Клеммы питания</td><td><span class="m">Würth 7461059</span>, M6, ≤ 3,9 Н·м</td></tr>
 </table>
 </div>
