@@ -60,8 +60,12 @@ static bool action(JsonVariantConst j,String& error) {
 }
 static bool apply(JsonVariantConst config,String& error) {
     if(updating) { error="OTA in progress"; return false; }
+    int previousMode=canMode, previousBitrate=canBitrateSel;
     if(!settingsApply(config,error)) return false;
-    vehicleSetMode(canMode); vehicleSetBitrate(canBitrateSel); settingsSave(); return true;
+    // Both setters restart CAN. A mode change already uses the new bitrate.
+    if(canMode!=previousMode) vehicleSetMode(canMode);
+    else if(canBitrateSel!=previousBitrate) vehicleSetBitrate(canBitrateSel);
+    settingsSave(); return true;
 }
 static void send(int code,const String& data) { server.sendHeader("Cache-Control","no-store"); server.send(code,"application/json",data); }
 static void error(int code,const String& text) { DynamicJsonDocument d(512); d["error"]=text; String out; serializeJson(d,out); send(code,out); }
@@ -96,7 +100,7 @@ void setupHub() {
     server.on("/api/session",HTTP_GET,[] { send(200,"{\"token\":\""+token+"\"}"); });
     server.on("/api/status",HTTP_GET,[] { send(200,hubStatusJson()); });
     server.on("/api/config",HTTP_GET,[] { bool backup=server.arg("backup")=="1"; if(backup&&!authorized()) return; send(200,settingsJson(backup)); });
-    server.on("/api/config",HTTP_POST,[] { if(!authorized()) return; DynamicJsonDocument d(24576); if(!body(d)) return; String e; if(!apply(d.as<JsonVariantConst>(),e)) { error(400,e); return; } send(200,"{\"ok\":true,\"master\":false}"); });
+    server.on("/api/config",HTTP_POST,[] { if(!authorized()) return; DynamicJsonDocument d(24576); if(!body(d)) return; String e; if(!apply(d.as<JsonVariantConst>(),e)) { error(400,e); return; } send(200,String("{\"ok\":true,\"master\":")+(drive.masterOn?"true}":"false}")); });
     server.on("/api/action",HTTP_POST,[] { if(!authorized()) return; DynamicJsonDocument d(1024); if(!body(d)) return; String e; if(!action(d.as<JsonVariantConst>(),e)) { error(400,e); return; } send(200,"{\"ok\":true}"); });
     server.on("/api/log",HTTP_GET,[] { server.send(200,"text/plain",sysLogTail(16000)); });
     server.on("/api/can",HTTP_GET,[] { server.send(200,"text/plain",sniffTableString()); });

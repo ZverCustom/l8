@@ -382,6 +382,17 @@ void runAnimations() {
 
     if (reinitPending) {
         reinitPending = false;
+        // With live settings the supply stays on. Clear removed pixels using
+        // the old frame length before shortening the controller's buffer.
+        bool clearTail = false;
+        for (int i = 0; i < NUM_STRIPS; i++) {
+            int previous = controllers[i]->size();
+            if (previous > numLedsPerStrip[i]) {
+                fill_solid(out[i] + numLedsPerStrip[i], previous - numLedsPerStrip[i], CRGB::Black);
+                clearTail = true;
+            }
+        }
+        if (clearTail) FastLED.show();
         for (int i = 0; i < NUM_STRIPS; i++) init(i);
     }
 

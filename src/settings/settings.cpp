@@ -86,7 +86,7 @@ bool settingsApply(JsonVariantConst value,String& error) {
     for(auto key:{"autoStart","allowWithoutIgn","sensor5v","cutPowerEngineOff"}) if(!g[key].is<bool>()) return fail("Invalid global switch");
     if(!integer(g["shiftRpm"],0,16000)||!integer(g["shiftColor"],0,0xffffff)||!integer(g["engineOff"],0,2)||!integer(g["dim"],0,100)||!integer(g["powerLimitMa"],0,40000)||!integer(g["maxSpeed"],1,400)||!number(g["maxG"],.1,10)||!number(g["maxYaw"],1,2000)||!integer(g["lateralAxis"],0,5)||!integer(g["yawAxis"],0,5)) return fail("Invalid global setting");
     next.autoStart=g["autoStart"]; next.allowWithoutIgn=g["allowWithoutIgn"]; next.sensor5v=g["sensor5v"]; next.cutPowerEngineOff=g["cutPowerEngineOff"];
-    auto& d=next.drive; d.masterOn=false; d.shiftRPM=g["shiftRpm"]; d.shiftColor=g["shiftColor"]; d.engineOff=g["engineOff"]; d.engineOffDim=g["dim"]; d.powerLimitMa=g["powerLimitMa"];
+    auto& d=next.drive; d.shiftRPM=g["shiftRpm"]; d.shiftColor=g["shiftColor"]; d.engineOff=g["engineOff"]; d.engineOffDim=g["dim"]; d.powerLimitMa=g["powerLimitMa"];
     d.maxSpeed=g["maxSpeed"]; d.maxLateralG=g["maxG"]; d.maxYawRate=g["maxYaw"]; d.lateralAxis=g["lateralAxis"]; d.yawAxis=g["yawAxis"];
     for(auto key:{"accOffset","gyroOffset"}) if(!g[key].is<JsonArrayConst>() || g[key].size()!=3) return fail("Invalid IMU offsets");
     for(int i=0;i<3;++i) { if(!number(g["accOffset"][i],-4,4)||!number(g["gyroOffset"][i],-500,500)) return fail("Invalid IMU offset range"); d.accOff[i]=g["accOffset"][i]; d.gyrOff[i]=g["gyroOffset"][i]; }
@@ -113,9 +113,13 @@ bool settingsApply(JsonVariantConst value,String& error) {
         v3::migrateLegacyChannels(next.channelMaxAmps); v3::migrateLegacyChannels(next.channelCal);
         for(auto& p:next.presets) if(p.used) { v3::migrateLegacyChannels(p.strips); v3::migrateLegacyChannels(p.numLeds); }
     }
-    // Commit only after validating every field; import always disarms outputs.
-    drive.masterOn=false; powerTick(); powerInhibit(true); ledsPause();
-    savedData=next; pushLive(); requestLedReinit(); ledsResume(); powerTick(); powerInhibit(false);
+    // Commit between frames. Keep the runtime Master state and the safety task's
+    // inhibit/latches intact; changing a colour must not cycle strip power.
+    bool resize=false;
+    for(int i=0;i<8;++i) resize |= next.numLeds[i]!=numLedsPerStrip[i];
+    ledsPause();
+    next.drive.masterOn=drive.masterOn;
+    savedData=next; pushLive(); if(resize) requestLedReinit(); powerTick(); ledsResume();
     return true;
 }
 static bool readConfig(const char* path) {
@@ -158,8 +162,8 @@ void settingsPresetSave(int i) {
 }
 bool settingsPresetLoad(int i) {
     if(i<0||i>=NUM_PRESETS||!savedData.presets[i].used) return false;
-    drive.masterOn=false; powerTick(); powerInhibit(true); ledsPause(); auto& p=savedData.presets[i];
+    ledsPause(); auto& p=savedData.presets[i];
     for(int s=0;s<8;++s) { stripSettings[s]=p.strips[s]; numLedsPerStrip[s]=p.numLeds[s]; }
-    can_setting=p.can; requestLedReinit(); ledsResume(); powerInhibit(false); settingsSave(); return true;
+    can_setting=p.can; requestLedReinit(); powerTick(); ledsResume(); settingsSave(); return true;
 }
 String settingsPresetName(int i) { return i>=0&&i<NUM_PRESETS&&savedData.presets[i].used ? savedData.presets[i].name : "empty"; }

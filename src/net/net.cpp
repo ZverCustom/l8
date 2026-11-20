@@ -7,33 +7,14 @@
 String wifiSsid, wifiPass;
 
 static const KnownNet knownNets[] = DEFAULT_NETWORKS;
-static const int knownCount = sizeof(knownNets) / sizeof(knownNets[0]);
-static int candidate = -1;   // -1 = saved creds, else index into knownNets
-
 const char* netDefaultSsid() { return knownNets[0].ssid; }
 const char* netDefaultPass() { return knownNets[0].pass; }
-
-// saved creds first, then every configured default network, round robin
-static void pickNext(String& ssid, String& pass) {
-    for (int step = 0; step <= knownCount; step++) {
-        candidate++;
-        if (candidate >= knownCount) candidate = -1;
-        if (candidate < 0) {
-            if (wifiSsid.length()) { ssid = wifiSsid; pass = wifiPass; return; }
-            continue;
-        }
-        if (!knownNets[candidate].ssid[0]) continue;
-        if (wifiSsid == knownNets[candidate].ssid && wifiPass == knownNets[candidate].pass) continue;  // same as saved
-        ssid = knownNets[candidate].ssid; pass = knownNets[candidate].pass; return;
-    }
-    ssid = wifiSsid; pass = wifiPass;
-}
 
 static bool apOn = false;
 static unsigned long staDownSince = 0;   // 0 = connected
 static unsigned long lastStaAttempt = 0;
 const unsigned long STA_TIMEOUT = 20000;  // no STA this long -> raise AP
-const unsigned long STA_RETRY = 30000;    // retry STA while AP is on
+const unsigned long STA_RETRY = 10000;    // retry selected STA without a 30 s startup stall
 
 static void startAP() {
     if (apOn) return;
@@ -55,12 +36,13 @@ static void stopAP() {
 }
 
 static void startSTA() {
-    String ssid, pass;
-    pickNext(ssid, pass);
+    // An explicitly selected network stays selected. A missed boot scan must
+    // not silently connect the controller to a different saved household/office.
     Serial.print("Connecting to Wi-Fi: ");
-    Serial.println(ssid);
-    WiFi.begin(ssid.c_str(), pass.c_str());
+    Serial.println(wifiSsid);
+    wl_status_t result=WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
     lastStaAttempt = millis();
+    if(result==WL_CONNECT_FAILED) Serial.println("Wi-Fi start failed; retry scheduled");
 }
 
 static bool anyNetworkConfigured() {
@@ -78,24 +60,6 @@ static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     Serial.println("Wi-Fi STA disconnected, reason " + String(r) + " " + why);
 }
 
-// One scan at boot: start with a network that is actually in range
-static void pickVisibleFirst() {
-    int n = WiFi.scanNetworks(false, false, false, 200);
-    if (n <= 0) { candidate = -1 - 1; return; }
-    auto visible = [&](const String& ssid) {
-        for (int i = 0; i < n; i++) if (WiFi.SSID(i) == ssid) return true;
-        return false;
-    };
-    if (wifiSsid.length() && visible(wifiSsid)) { candidate = -1 - 1; }
-    else {
-        candidate = -1 - 1;
-        for (int i = 0; i < knownCount; i++) {
-            if (knownNets[i].ssid[0] && visible(knownNets[i].ssid)) { candidate = i - 1; break; }
-        }
-    }
-    WiFi.scanDelete();
-}
-
 void netBegin() {
     WiFi.onEvent(onWifiEvent);
     WiFi.persistent(false);  // credentials live in config-v3.json
@@ -108,12 +72,10 @@ void netBegin() {
     }
     WiFi.mode(WIFI_STA);
     staDownSince = millis();
-    pickVisibleFirst();
     startSTA();
 }
 
 void netReconnect() {
-    candidate = -1 - 1;
     if (!anyNetworkConfigured()) {
         WiFi.disconnect();
         startAP();

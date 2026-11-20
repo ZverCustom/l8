@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "phase": "USB reset",
+      "connectedByUptimeMs": 15078,
+      "selectedNetwork": true,
+      "master": false,
+      "firmware": "0.3.3-dev"
+    },
+    {
+      "phase": "software reboot",
+      "connectedByUptimeMs": 14549,
+      "selectedNetwork": true,
+      "master": false,
+      "firmware": "0.3.3-dev"
+    }
+  ],
+  "configurationPreserved": true
+}
