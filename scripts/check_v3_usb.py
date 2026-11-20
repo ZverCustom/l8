@@ -28,11 +28,12 @@ try:
  check('USB-only test precondition',state['vbat']<1 and not state['ign'] and not state['hold'])
  check('healthy safe boot',state['ioOk'] and not state['ioFault'] and state['imu']['ok'] and state['otaConfirmed'] and not state['master'] and all(not c['on'] and not c['data'] for c in state['channels']))
  original=cmd({'cmd':'get_config'})
- check('safe configuration',not original['global']['autoStart'] and not original['global']['allowWithoutIgn'] and not original['global']['sensor5v'])
+ check('safe configuration',not original['global']['autoStart'] and not original['global']['sensor5v'])
  check('schema 3 / eight strips / three inputs',original['schema']==3 and len(original['strips'])==8 and len(original['inputs'])==3)
  check('Wi-Fi password redacted',original['network']['password']=='' and original['network']['keepPassword'])
  for name,mutate in [
   ('wrong schema',lambda c:c.update(schema=2)),
+  ('invalid IGN policy',lambda c:c['global'].update(allowWithoutIgn='true')),
   ('missing strip',lambda c:c['strips'].pop()),
   ('excessive current limit',lambda c:c['strips'][7].update(maxAmps=100)),
   ('invalid current calibration',lambda c:c['strips'][4].update(currentCal=None)),
@@ -46,6 +47,15 @@ try:
   check('atomic reject '+name,cmd({'cmd':'get_config'})==original)
  for action in [{'action':'master','on':'true'},{'action':'reset','channel':8},{'action':'preset_load','slot':9},{'action':'nonexistent'}]:
   out=cmd({'cmd':'action',**action});check('reject action '+str(action),out.get('ok') is False)
+ for allow_without_ign in [False,True]:
+  changed=copy.deepcopy(original);changed['global']['allowWithoutIgn']=allow_without_ign
+  check('apply IGN policy '+str(allow_without_ign),cmd({'cmd':'set_config','config':changed}).get('ok') is True)
+  check('read back IGN policy '+str(allow_without_ign),cmd({'cmd':'get_config'})==changed)
+  check('enable Master on USB',cmd({'cmd':'action','action':'master','on':True}).get('ok') is True)
+  time.sleep(.1)
+  state=cmd({'cmd':'status'})
+  check('USB blocks strip power regardless of IGN policy '+str(allow_without_ign),state['allowWithoutIgn']==allow_without_ign and state['master'] and not state['ign'] and not state['hold'] and not state['ledPowerAllowed'] and all(not c['on'] and not c['data'] for c in state['channels']))
+  check('disable Master on USB',cmd({'cmd':'action','action':'master','on':False}).get('ok') is True)
  changed=copy.deepcopy(original);changed['global']['brightness']=31;changed['strips'][7]['color']=0x4488ff
  check('apply config',cmd({'cmd':'set_config','config':changed}).get('ok') is True)
  check('read back config',cmd({'cmd':'get_config'})==changed)

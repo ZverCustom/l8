@@ -1,0 +1,170 @@
+{
+  "passed": 47,
+  "checks": [
+    "USB-only test precondition",
+    "healthy safe boot",
+    "safe configuration",
+    "schema 3 / eight strips / three inputs",
+    "Wi-Fi password redacted",
+    "reject wrong schema",
+    "atomic reject wrong schema",
+    "reject invalid IGN policy",
+    "atomic reject invalid IGN policy",
+    "reject missing strip",
+    "atomic reject missing strip",
+    "reject excessive current limit",
+    "atomic reject excessive current limit",
+    "reject invalid current calibration",
+    "atomic reject invalid current calibration",
+    "reject invalid input range",
+    "atomic reject invalid input range",
+    "reject out of bounds center",
+    "atomic reject out of bounds center",
+    "reject invalid preset content",
+    "atomic reject invalid preset content",
+    "reject action {'action': 'master', 'on': 'true'}",
+    "reject action {'action': 'reset', 'channel': 8}",
+    "reject action {'action': 'preset_load', 'slot': 9}",
+    "reject action {'action': 'nonexistent'}",
+    "apply IGN policy False",
+    "read back IGN policy False",
+    "enable Master on USB",
+    "USB blocks strip power regardless of IGN policy False",
+    "disable Master on USB",
+    "apply IGN policy True",
+    "read back IGN policy True",
+    "enable Master on USB",
+    "USB blocks strip power regardless of IGN policy True",
+    "disable Master on USB",
+    "apply config",
+    "read back config",
+    "save preset",
+    "preset contains eight strips",
+    "apply temporary change",
+    "load preset",
+    "preset restored brightness",
+    "restore initial config",
+    "reboot command",
+    "config persists after reboot",
+    "safe healthy reboot",
+    "oversize line discarded through newline"
+  ],
+  "finalStatus": {
+    "product": "ZVER L8",
+    "hardware": 3,
+    "firmware": "0.3.1-dev",
+    "uptimeMs": 8499,
+    "master": false,
+    "vbat": 0,
+    "ign": false,
+    "hold": false,
+    "allowWithoutIgn": true,
+    "ledPowerAllowed": false,
+    "ioOk": true,
+    "ioFault": false,
+    "powerStatus": "USB / supply outside 9-16.5 V",
+    "totalAmps": 0,
+    "sensorOn": false,
+    "sensorFault": false,
+    "heap": 203932,
+    "psram": 2097152,
+    "flash": 16777216,
+    "ap": false,
+    "apSsid": "ZVER-L8",
+    "canStatus": "running 0 fps err=0 rec=0",
+    "canBitrate": "500k",
+    "dataFresh": false,
+    "rpm": 0,
+    "speed": 0,
+    "temp": 0,
+    "throttle": 0,
+    "channels": [
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      },
+      {
+        "on": false,
+        "amps": 0,
+        "fault": "",
+        "isVolts": 0,
+        "data": false
+      }
+    ],
+    "inputs": [
+      {
+        "mv": 0,
+        "volts": 0,
+        "value": 0
+      },
+      {
+        "mv": 0,
+        "volts": 0,
+        "value": 0
+      },
+      {
+        "mv": 0,
+        "volts": 0,
+        "value": 0
+      }
+    ],
+    "imu": {
+      "ok": true,
+      "ax": 0.01738406,
+      "ay": -0.023317687,
+      "az": 1.019088268,
+      "gx": 1.262510896,
+      "gy": -1.215568185,
+      "gz": -0.39150086,
+      "temp": 28.0078125,
+      "lateralG": -0.039857775,
+      "yaw": -0.150755361
+    },
+    "otaConfirmed": true
+  }
+}

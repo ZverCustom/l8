@@ -23,6 +23,7 @@ String hubStatusJson() {
     auto p=powerSnapshot(); DynamicJsonDocument d(8192);
     d["product"]="ZVER L8"; d["hardware"]=3; d["firmware"]=L8_FW_VERSION; d["uptimeMs"]=millis();
     d["master"]=drive.masterOn; d["vbat"]=p.vbat; d["ign"]=p.ign; d["hold"]=p.hold;
+    d["allowWithoutIgn"]=savedData.allowWithoutIgn; d["ledPowerAllowed"]=p.ledPowerAllowed;
     d["ioOk"]=p.ioOk; d["ioFault"]=p.ioLatched; d["powerStatus"]=powerStatusString();
     d["totalAmps"]=p.ledAmps; d["sensorOn"]=p.sensorOn; d["sensorFault"]=p.sensorFault;
     d["heap"]=ESP.getFreeHeap(); d["psram"]=psramFound()?esp_spiram_get_size():0; d["flash"]=ESP.getFlashChipSize();

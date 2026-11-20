@@ -9,7 +9,11 @@ inline uint16_t senseSelect(unsigned channel) {
     return channel < 8 ? uint16_t((1u << (8 + channel/2)) | ((channel & 1) << 12)) : 0;
 }
 inline bool supplyValid(float vbat) { return isfinite(vbat) && vbat >= 9.0f && vbat <= 16.5f; }
-inline bool outputsAllowed(float vbat,bool ign,bool bench,bool inhibit,bool ready,bool latched) { return supplyValid(vbat) && (ign||bench) && !inhibit && ready && !latched; }
+// Keep the 5.4 V buck running independently of IGN and load protection.
+// Never drive its EN from HOLD on USB alone; 6 V leaves headroom above 5.4 V.
+inline bool controllerHold(float vbat) { return isfinite(vbat) && vbat >= 6.0f; }
+inline bool outputsAllowed(float vbat,bool inhibit,bool ready,bool latched) { return supplyValid(vbat) && !inhibit && ready && !latched; }
+inline bool ledsAllowed(float vbat,bool ign,bool allowWithoutIgn,bool inhibit,bool ready,bool latched) { return outputsAllowed(vbat,inhibit,ready,latched) && (ign||allowWithoutIgn); }
 inline float inputFraction(float mv, int mode, float low, float high, float threshold) {
     if (mode == 1) return mv > threshold ? 1.f : 0.f;
     if (mode == 2) return mv < threshold ? 1.f : 0.f;

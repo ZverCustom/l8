@@ -10,6 +10,7 @@ static uint32_t requested=0;
 static constexpr const char* PATH="/config-v3.json";
 static void defaults() {
     memset(&savedData,0,sizeof(savedData));
+    savedData.allowWithoutIgn=true;
     savedData.can_setting={2000,7000,60,30};
     savedData.canMode=CAN_MODE_SNIFFER;
     savedData.bitrate=1; // fixed 500 kbit/s; 0 selects passive auto scan

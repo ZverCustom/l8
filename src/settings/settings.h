@@ -36,7 +36,7 @@ struct InputSettings { int mode; float low, high, thresholdMv; };
 
 struct SavedData {
     bool autoStart;
-    bool allowWithoutIgn;
+    bool allowWithoutIgn; // strip power policy; never gates controller HOLD or peripherals
     bool sensor5v;
     int bitrate;
     float channelMaxAmps[8];

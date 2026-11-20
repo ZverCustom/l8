@@ -6,7 +6,7 @@
 #include <v3_safety.h>
 #include <driver/gpio.h>
 struct Request {
-    bool master=false, bench=false, sensor=false, inhibit=false, silent=true;
+    bool master=false, allowWithoutIgn=false, sensor=false, inhibit=false, silent=true;
     bool enabled[8]={};
     float maxAmps[8]={}, calibration[8]={};
     int inputMode[3]={}; float low[3]={}, high[3]={}, threshold[3]={};
@@ -28,7 +28,7 @@ void powerTick() {
     next.master=drive.masterOn;
     bool parked=savedData.cutPowerEngineOff && drive.engineOff==2 && !(vehicleDataFresh() && vehicle.rpm>300);
     if(parked) next.master=false;
-    next.bench=savedData.allowWithoutIgn; next.sensor=savedData.sensor5v;
+    next.allowWithoutIgn=savedData.allowWithoutIgn; next.sensor=savedData.sensor5v;
     for(int i=0;i<8;++i) { next.enabled[i]=stripSettings[i].enabled; next.maxAmps[i]=savedData.channelMaxAmps[i]; next.calibration[i]=savedData.channelCal[i]; }
     for(int i=0;i<3;++i) { next.inputMode[i]=savedData.inputs[i].mode; next.low[i]=savedData.inputs[i].low; next.high[i]=savedData.inputs[i].high; next.threshold[i]=savedData.inputs[i].thresholdMv; }
     portENTER_CRITICAL(&stateMux);
@@ -39,22 +39,20 @@ static void safetyTask(void*) {
     PowerState s;
     bool initOk=expSafeInit(); s.ioOk=initOk; s.ioLatched=!initOk;
     int previousModes[3]={-1,-1,-1};
-    uint32_t ignChanged=millis(), fallAt=0, lastCheck=0;
-    bool rawPrevious=digitalRead(IGN_PIN), everIgn=false;
+    uint32_t ignChanged=millis(), lastCheck=0;
+    bool rawPrevious=digitalRead(IGN_PIN);
     uint32_t enabledAt[8]={};
     for(;;) {
         uint32_t now=millis(); Request cfg; uint16_t reset;
         portENTER_CRITICAL(&stateMux); cfg=request; reset=resetMask; resetMask=0; portEXIT_CRITICAL(&stateMux);
         s.vbat=vbatFromAdc(analogReadMilliVolts(VBAT_SENSE_PIN)/1000.f);
-        bool supply=v3::supplyValid(s.vbat);
         bool raw=digitalRead(IGN_PIN);
         if(raw!=rawPrevious) { rawPrevious=raw; ignChanged=now; }
-        if(now-ignChanged>=20 && s.ign!=raw) {
-            s.ign=raw;
-            if(!raw && everIgn) fallAt=now;
-        }
-        if(s.ign) { everIgn=true; fallAt=0; }
-        s.hold=supply && (s.ign || (fallAt && now-fallAt<500));
+        if(now-ignChanged>=20) s.ign=raw;
+        // IGN controls strip policy only. Once started, keep the controller alive
+        // for settings/diagnostics even when IGN, Master or the outputs are off.
+        // The v3 hardware still needs USB or IGN to start the buck from cold.
+        s.hold=v3::controllerHold(s.vbat);
         gpio_set_level((gpio_num_t)HOLD_PIN, s.hold);
         // Resets require Master OFF; restoring I2C never resumes loads automatically.
         if(reset && !cfg.master) {
@@ -66,10 +64,11 @@ static void safetyTask(void*) {
             lastCheck=now; uint16_t config=0xffff;
             if(!expRead(6,config) || config!=0) { initOk=false; s.ioLatched=true; }
         }
-        bool allowed=v3::outputsAllowed(s.vbat,s.ign,cfg.bench,cfg.inhibit,initOk,s.ioLatched);
+        bool allowed=v3::outputsAllowed(s.vbat,cfg.inhibit,initOk,s.ioLatched);
+        s.ledPowerAllowed=v3::ledsAllowed(s.vbat,s.ign,cfg.allowWithoutIgn,cfg.inhibit,initOk,s.ioLatched);
         uint8_t mask=0;
         for(int i=0;i<8;++i) {
-            bool on=allowed && cfg.master && cfg.enabled[i] && !s.channels[i].fault;
+            bool on=s.ledPowerAllowed && cfg.master && cfg.enabled[i] && !s.channels[i].fault;
             if(on && !s.channels[i].on) { enabledAt[i]=now; latches[i].reset(); }
             s.channels[i].on=on;
             if(on) mask|=1u<<i;
@@ -106,6 +105,7 @@ static void safetyTask(void*) {
         if(ok) ok=expWrite(2,base);
         if(!ok) {
             boardDataMask(0); s.ioLatched=true; s.latched=true; initOk=false;
+            s.ledPowerAllowed=false;
             expWrite(2,v3::SAFE); // best effort: broken I2C cannot guarantee physical IN levels
             for(auto& ch:s.channels) ch.on=false;
             s.sensorOn=false;
@@ -139,7 +139,8 @@ String powerStatusString() {
     auto s=powerSnapshot();
     if(s.ioLatched) return "I2C fault: outputs unconfirmed; reset with Master off";
     if(!v3::supplyValid(s.vbat)) return "USB / supply outside 9-16.5 V";
-    if(!s.ign && !savedData.allowWithoutIgn) return "IGN off";
+    if(s.inhibited) return "outputs inhibited";
+    if(!s.ign && !savedData.allowWithoutIgn) return "strips waiting for IGN";
     if(s.latched) return "channel / sensor protection";
     return s.on ? "on" : "off";
 }

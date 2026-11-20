@@ -4,6 +4,7 @@ struct ChannelPower { float amps=0, isVolts=0; bool on=false; uint8_t fault=0; u
 struct PowerState {
     float vbat=0, ledAmps=0, isVolts=0;
     bool inhibited=false;
+    bool ledPowerAllowed=false; // supply / IGN / inhibit / I2C; Master and channel faults are separate
     bool on=false, latched=false, ign=false, hold=false, ioOk=false, ioLatched=false;
     bool sensorOn=false, sensorFault=false;
     ChannelPower channels[8];

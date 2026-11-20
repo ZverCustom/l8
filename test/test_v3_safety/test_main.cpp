@@ -1,4 +1,5 @@
 #include <unity.h>
+#include <initializer_list>
 #include <v3_safety.h>
 void setUp() {} void tearDown() {}
 void test_bts7008_conversion_and_safe_supply() {
@@ -25,11 +26,28 @@ void test_all_channel_latches_independent() {
 }
 void test_supply_and_ign_interlocks() {
     for(int bits=0;bits<64;++bits) {
-        bool ign=bits&1,bench=bits&2,inhibit=bits&4,ready=bits&8,latched=bits&16;
+        bool ign=bits&1,allowWithoutIgn=bits&2,inhibit=bits&4,ready=bits&8,latched=bits&16;
         float vbat=bits&32?12.f:0.f;
-        bool allow=v3::outputsAllowed(vbat,ign,bench,inhibit,ready,latched);
-        if(vbat==0||(!ign&&!bench)||inhibit||!ready||latched) TEST_ASSERT_FALSE(allow);
+        bool allow=v3::ledsAllowed(vbat,ign,allowWithoutIgn,inhibit,ready,latched);
+        if(vbat==0||(!ign&&!allowWithoutIgn)||inhibit||!ready||latched) TEST_ASSERT_FALSE(allow);
         else TEST_ASSERT_TRUE(allow);
+        // IGN must never disable CAN/sensor power or the controller itself.
+        TEST_ASSERT_EQUAL(vbat!=0&&!inhibit&&ready&&!latched,v3::outputsAllowed(vbat,inhibit,ready,latched));
+        TEST_ASSERT_EQUAL(vbat!=0,v3::controllerHold(vbat));
+    }
+}
+void test_controller_stays_alive_outside_strip_voltage_range() {
+    for(float vbat : {0.f,.4f,5.f,5.9f,NAN,INFINITY}) TEST_ASSERT_FALSE(v3::controllerHold(vbat));
+    for(float vbat : {6.f,8.9f,17.f}) {
+        TEST_ASSERT_TRUE(v3::controllerHold(vbat));
+        TEST_ASSERT_FALSE(v3::outputsAllowed(vbat,false,true,false));
+        TEST_ASSERT_FALSE(v3::ledsAllowed(vbat,false,true,false,true,false));
+    }
+    for(float vbat : {9.f,12.f,16.5f}) {
+        TEST_ASSERT_TRUE(v3::controllerHold(vbat));
+        TEST_ASSERT_TRUE(v3::outputsAllowed(vbat,false,true,false));
+        TEST_ASSERT_TRUE(v3::ledsAllowed(vbat,false,true,false,true,false));
+        TEST_ASSERT_FALSE(v3::ledsAllowed(vbat,false,false,false,true,false));
     }
 }
 void test_input_topology_and_clamps() {
@@ -41,4 +59,4 @@ void test_input_topology_and_clamps() {
     TEST_ASSERT_EQUAL_FLOAT(0,v3::inputFraction(1650,2,0,5,1565));
     TEST_ASSERT_EQUAL_FLOAT(1,v3::inputFraction(1480,2,0,5,1565));
 }
-int main(){UNITY_BEGIN();RUN_TEST(test_bts7008_conversion_and_safe_supply);RUN_TEST(test_shared_sense_never_selects_two_switches);RUN_TEST(test_all_channel_latches_independent);RUN_TEST(test_supply_and_ign_interlocks);RUN_TEST(test_input_topology_and_clamps);return UNITY_END();}
+int main(){UNITY_BEGIN();RUN_TEST(test_bts7008_conversion_and_safe_supply);RUN_TEST(test_shared_sense_never_selects_two_switches);RUN_TEST(test_all_channel_latches_independent);RUN_TEST(test_supply_and_ign_interlocks);RUN_TEST(test_controller_stays_alive_outside_strip_voltage_range);RUN_TEST(test_input_topology_and_clamps);return UNITY_END();}
