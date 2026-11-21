@@ -4,6 +4,16 @@
 namespace l8net {
 enum class Phase { Idle, Connecting, Address, Online, Failed, Stopping };
 enum class Action { Wait, Start, Cancel };
+class HttpActivity {
+    bool seen=false;
+    uint32_t last=0;
+public:
+    void touch(uint32_t now) { seen=true; last=now; }
+    bool active(uint32_t now) {
+        if(seen && uint32_t(now-last)>=60000) seen=false;
+        return seen;
+    }
+};
 class Retry {
 public:
     Phase phase=Phase::Idle;
@@ -20,13 +30,17 @@ public:
         else failed(now);
     }
     void stopping(uint32_t now) { phase=Phase::Stopping; since=now; }
-    Action next(uint32_t now,bool ap,unsigned clients) const {
+    void reconcileOffline(uint32_t now,bool associatedNow) {
+        if(associatedNow) associated(now);
+        else if(phase==Phase::Online) failed(now);
+    }
+    Action next(uint32_t now,bool ap,bool httpActive) const {
         uint32_t age=now-since;
         if(phase==Phase::Connecting) return age>=45000 ? Action::Cancel : Action::Wait;
         if(phase==Phase::Address) return age>=60000 ? Action::Cancel : Action::Wait;
         if(phase==Phase::Online || phase==Phase::Stopping) return Action::Wait;
         // Keep the AP radio available while someone is using the configurator.
-        if(ap && clients) return Action::Wait;
+        if(ap && httpActive) return Action::Wait;
         return age>=(ap?30000u:10000u) ? Action::Start : Action::Wait;
     }
 };

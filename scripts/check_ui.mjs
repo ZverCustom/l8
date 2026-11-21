@@ -32,4 +32,10 @@ await flush();expired.run("set('global.brightness',20)");await expired.element('
 let writes=0;const lost=harness((url,options)=>{if(options.method==='POST'){writes++;throw Error('connection lost')}return normal(url)});await flush();lost.run("set('global.brightness',20)");await lost.element('save').onclick();assert.equal(writes,1);assert.equal(lost.run('dirty'),true);
 // Poll failures recover without discarding unsaved local edits.
 let offline=false;const polling=harness(url=>{if(offline)throw Error('offline');return normal(url)});await flush();polling.run("set('global.brightness',17)");offline=true;await polling.tick(1000);offline=false;await polling.tick(1000);assert.equal(polling.run('config.global.brightness'),17);assert.equal(polling.run('dirty'),true);
-console.log('PASS: startup, single-request save, Master on/off, edits during save, startup timeout/retry, session renewal, no ambiguous write retry, reconnect preserves edits');
+// A hidden configurator must not keep extending the AP activity window.
+const visibility=harness(normal);await flush();visibility.run("set('global.brightness',19)");
+visibility.run('document.hidden=true');const count=visibility.calls.length;await visibility.tick(1000);
+assert.equal(visibility.calls.length,count);assert.equal(visibility.run('dirty'),true);
+visibility.run('document.hidden=false');await visibility.tick(1000);
+assert.equal(visibility.calls.length,count+1);assert.equal(visibility.run('config.global.brightness'),19);
+console.log('PASS: startup, single-request save, Master on/off, edits during save, startup timeout/retry, session renewal, no ambiguous write retry, reconnect preserves edits, hidden-tab polling pause');

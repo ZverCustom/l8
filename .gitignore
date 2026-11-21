@@ -10,3 +10,4 @@ enclosure/.venv/
 enclosure/out/
 __pycache__/
 *.py[cod]
+/logs/

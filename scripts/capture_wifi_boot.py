@@ -3,11 +3,13 @@
 Read-only status polling; no settings changes. Log contains SSIDs: keep it private.
 """
 import argparse,json,os,time
+from datetime import datetime,timezone
 from pathlib import Path
 import serial
-p=argparse.ArgumentParser();p.add_argument('--port',default='/dev/cu.usbmodem1101');p.add_argument('--seconds',type=int,default=90);p.add_argument('--output',type=Path,default=Path('/tmp/l8-wifi-boot.log'));a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--port',default='/dev/cu.usbmodem1101');p.add_argument('--seconds',type=int,default=90);p.add_argument('--output',type=Path,default=Path(__file__).resolve().parents[1]/'logs'/('wifi-boot-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')+'.log'));a=p.parse_args()
 if not 15<=a.seconds<=300:p.error('--seconds must be between 15 and 300')
 s=serial.Serial();s.port=a.port;s.baudrate=115200;s.timeout=.2;s.write_timeout=2;s.dtr=False;s.rts=False
+a.output.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
 fd=os.open(a.output,os.O_CREAT|os.O_TRUNC|os.O_WRONLY,0o600);os.fchmod(fd,0o600)
 with os.fdopen(fd,'w') as log:
  try:

@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <net_retry.h>
+#include <atomic>
 #include "config/config.h"
 #include "system/system.h"
 
@@ -14,6 +15,8 @@ static bool apOn=false, wasConnected=false, startPending=false;
 static uint32_t downSince=0, attempts=0;
 static uint8_t lastReason=0;
 static l8net::Retry retry;
+static l8net::HttpActivity apHttp;
+static std::atomic<uint32_t> droppedEvents{0};
 static constexpr uint32_t AP_DELAY=20000;
 struct NetEvent { WiFiEvent_t id; uint32_t at; uint8_t reason; };
 static QueueHandle_t events=nullptr;
@@ -23,6 +26,7 @@ static void startAP() {
     WiFi.mode(wifiSsid.length()?WIFI_AP_STA:WIFI_AP);
     if(WiFi.softAP(AP_SSID,AP_PASSWORD)) {
         apOn=true;
+        apHttp=l8net::HttpActivity{};
         sysLog("AP started "+WiFi.softAPIP().toString());
     } else Serial.println("Failed to start Access Point!");
 }
@@ -50,9 +54,15 @@ static void onWifiEvent(WiFiEvent_t id,WiFiEventInfo_t info) {
         default:return;
     }
     NetEvent event{id,millis(),uint8_t(id==ARDUINO_EVENT_WIFI_STA_DISCONNECTED?info.wifi_sta_disconnected.reason:0)};
-    if(events) xQueueSend(events,&event,0);
+    if(events && xQueueSend(events,&event,0)!=pdTRUE) droppedEvents.fetch_add(1,std::memory_order_relaxed);
 }
 static void consumeEvents() {
+    static uint32_t reportedDrops=0;
+    uint32_t drops=droppedEvents.load(std::memory_order_relaxed);
+    if(drops!=reportedDrops) {
+        Serial.printf("Wi-Fi event queue overflow: %lu events dropped\n",drops);
+        reportedDrops=drops;
+    }
     NetEvent event;
     while(events && xQueueReceive(events,&event,0)==pdTRUE) {
         Serial.printf("Wi-Fi event t=%lu %s",event.at,WiFi.eventName(event.id));
@@ -111,21 +121,24 @@ void netTick() {
             if(MDNS.begin("zver-l8")) MDNS.addService("http","tcp",80);
         }
         // Finish an AP editing session before removing its network.
-        if(!apOn || !WiFi.softAPgetStationNum()) stopAP();
+        if(!netApHttpActive()) stopAP();
         return;
     }
     if(wasConnected) { wasConnected=false; downSince=now; sysLog(F("Wi-Fi lost")); }
     // Association and DHCP are distinct. WL_CONNECTED means IP is assigned;
     // its absence alone is not permission to restart an ongoing attempt.
-    if(WiFi.getStatusBits()&STA_CONNECTED_BIT) retry.associated(now);
+    retry.reconcileOffline(now,WiFi.getStatusBits()&STA_CONNECTED_BIT);
     if(!apOn && now-downSince>=AP_DELAY) startAP();
-    auto action=retry.next(now,apOn,apOn?WiFi.softAPgetStationNum():0);
+    auto action=retry.next(now,apOn,netApHttpActive());
     if(action==l8net::Action::Cancel) {
         Serial.printf("Wi-Fi attempt timeout t=%lu phase=%d; disconnecting\n",now,int(retry.phase));
         retry.stopping(now); WiFi.disconnect(false,false);
     } else if(action==l8net::Action::Start) startSTA();
 }
 bool netApOn() { return apOn; }
+void netApHttpActivity() { if(apOn) apHttp.touch(millis()); }
+bool netApHttpActive() { return apOn && apHttp.active(millis()); }
+uint32_t netDroppedEvents() { return droppedEvents.load(std::memory_order_relaxed); }
 const char* netPhase() {
     if(!wifiSsid.length()) return "ap_only";
     switch(retry.phase) {
