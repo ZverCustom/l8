@@ -13,6 +13,7 @@
 #include "system/system.h"
 #include "board/board.h"
 #include <channel_map.h>
+#include <v3_safety.h>
 #include "l8_ui.h"
 static WebServer server(80);
 static String token, serialLine;
@@ -20,6 +21,9 @@ static uint32_t rebootAt=0, reconnectAt=0;
 static bool updating=false, uploadOk=false;
 static String uploadError;
 static bool bootConfirmed=false;
+static void syncHubInhibit() {
+    powerInhibit(v3::hubInhibited(bootConfirmed,updating,uploadOk,rebootAt!=0));
+}
 String hubStatusJson() {
     auto p=powerSnapshot(); DynamicJsonDocument d(8192);
     d["product"]="ZVER L8"; d["hardware"]=3; d["firmware"]=L8_FW_VERSION; d["uptimeMs"]=millis();
@@ -29,6 +33,8 @@ String hubStatusJson() {
     d["totalAmps"]=p.ledAmps; d["sensorOn"]=p.sensorOn; d["sensorFault"]=p.sensorFault;
     d["heap"]=ESP.getFreeHeap(); d["psram"]=psramFound()?esp_spiram_get_size():0; d["flash"]=ESP.getFlashChipSize();
     d["network"]=netStatusString(); d["ap"]=netApOn(); d["apSsid"]=AP_SSID;
+    auto wifi=d.createNestedObject("wifi"); wifi["phase"]=netPhase(); wifi["attempts"]=netAttempts();
+    wifi["lastDisconnectReason"]=netLastDisconnectReason(); wifi["apClients"]=netApOn()?WiFi.softAPgetStationNum():0;
     d["ip"]=WiFi.status()==WL_CONNECTED?WiFi.localIP().toString():WiFi.softAPIP().toString();
     d["canStatus"]=canStatusString(); d["canBitrate"]=canBitrateString(); d["dataFresh"]=vehicleDataFresh();
     d["rpm"]=vehicle.rpm; d["speed"]=vehicle.speed; d["temp"]=vehicle.temp; d["throttle"]=vehicle.throttle;
@@ -90,7 +96,7 @@ static void upload() {
         if(updating) { updating=false; ledsResume(); } // Master stays off
     } else if(u.status==UPLOAD_FILE_ABORTED) {
         if(updating) { Update.abort(); updating=false; ledsResume(); }
-        uploadError="Upload aborted"; powerInhibit(false);
+        uploadError="Upload aborted"; syncHubInhibit();
     }
 }
 void setupHub() {
@@ -107,7 +113,7 @@ void setupHub() {
     server.on("/api/ota",HTTP_POST,[] {
         if(!authorized()) return;
         if(uploadOk) { send(200,"{\"ok\":true,\"reboot\":true}"); rebootAt=millis()+800; }
-        else { powerInhibit(false); error(400,uploadError.length()?uploadError:"No firmware received"); }
+        else { syncHubInhibit(); error(400,uploadError.length()?uploadError:"No firmware received"); }
     },upload);
     server.onNotFound([] { if(server.uri().startsWith("/api/")) { error(404,"Not found"); return; } server.sendHeader("Location","/"); server.send(302,"text/plain",""); });
     server.begin(); Serial.println("L8 configurator ready; USB JSON: status / get_config / set_config / action");
@@ -140,7 +146,7 @@ void updateHub() {
     if(rebootAt && int32_t(now-rebootAt)>=0) ESP.restart();
     if(!bootConfirmed && now>=5000) {
         bool healthy=powerSnapshot().ioOk && imu.ok && psramFound() && settingsHealthy();
-        if(healthy) { esp_ota_mark_app_valid_cancel_rollback(); bootConfirmed=true; powerInhibit(false); Serial.println("L8 boot self-check passed; OTA image confirmed"); }
+        if(healthy) { esp_ota_mark_app_valid_cancel_rollback(); bootConfirmed=true; syncHubInhibit(); Serial.println("L8 boot self-check passed; OTA image confirmed"); }
         else if(now>=15000) { esp_ota_img_states_t st; const auto* p=esp_ota_get_running_partition(); if(esp_ota_get_state_partition(p,&st)==ESP_OK && st==ESP_OTA_IMG_PENDING_VERIFY) esp_ota_mark_app_invalid_rollback_and_reboot(); }
     }
 }

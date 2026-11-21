@@ -88,4 +88,15 @@ void test_input_topology_and_clamps() {
     TEST_ASSERT_EQUAL_FLOAT(0,v3::inputFraction(1650,2,0,5,1565));
     TEST_ASSERT_EQUAL_FLOAT(1,v3::inputFraction(1480,2,0,5,1565));
 }
-int main(){UNITY_BEGIN();RUN_TEST(test_connector_order_routes_power_data_and_sense_together);RUN_TEST(test_legacy_settings_follow_the_physical_output);RUN_TEST(test_bts7008_conversion_and_safe_supply);RUN_TEST(test_shared_sense_never_selects_two_switches);RUN_TEST(test_all_channel_latches_independent);RUN_TEST(test_supply_and_ign_interlocks);RUN_TEST(test_controller_stays_alive_outside_strip_voltage_range);RUN_TEST(test_input_topology_and_clamps);return UNITY_END();}
+void test_ota_failure_keeps_boot_and_reboot_inhibits() {
+    // Failed/aborted upload before the boot self-check: keep outputs inhibited.
+    TEST_ASSERT_TRUE(v3::hubInhibited(false,true,false,false));
+    TEST_ASSERT_TRUE(v3::hubInhibited(false,false,false,false));
+    // A completed self-check must not clear an active or successful OTA hold.
+    TEST_ASSERT_TRUE(v3::hubInhibited(true,true,false,false));
+    TEST_ASSERT_TRUE(v3::hubInhibited(true,false,true,false));
+    TEST_ASSERT_TRUE(v3::hubInhibited(true,false,false,true));
+    // Recovery is allowed only after a healthy boot, without OTA/reboot holds.
+    TEST_ASSERT_FALSE(v3::hubInhibited(true,false,false,false));
+}
+int main(){UNITY_BEGIN();RUN_TEST(test_ota_failure_keeps_boot_and_reboot_inhibits);RUN_TEST(test_connector_order_routes_power_data_and_sense_together);RUN_TEST(test_legacy_settings_follow_the_physical_output);RUN_TEST(test_bts7008_conversion_and_safe_supply);RUN_TEST(test_shared_sense_never_selects_two_switches);RUN_TEST(test_all_channel_latches_independent);RUN_TEST(test_supply_and_ign_interlocks);RUN_TEST(test_controller_stays_alive_outside_strip_voltage_range);RUN_TEST(test_input_topology_and_clamps);return UNITY_END();}

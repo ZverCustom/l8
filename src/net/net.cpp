@@ -1,126 +1,152 @@
 #include "net.h"
 #include <WiFi.h>
 #include <ESPmDNS.h>
+#include <net_retry.h>
 #include "config/config.h"
 #include "system/system.h"
 
 String wifiSsid, wifiPass;
-
 static const KnownNet knownNets[] = DEFAULT_NETWORKS;
 const char* netDefaultSsid() { return knownNets[0].ssid; }
 const char* netDefaultPass() { return knownNets[0].pass; }
 
-static bool apOn = false;
-static unsigned long staDownSince = 0;   // 0 = connected
-static unsigned long lastStaAttempt = 0;
-const unsigned long STA_TIMEOUT = 20000;  // no STA this long -> raise AP
-const unsigned long STA_RETRY = 10000;    // retry selected STA without a 30 s startup stall
+static bool apOn=false, wasConnected=false, startPending=false;
+static uint32_t downSince=0, attempts=0;
+static uint8_t lastReason=0;
+static l8net::Retry retry;
+static constexpr uint32_t AP_DELAY=20000;
+struct NetEvent { WiFiEvent_t id; uint32_t at; uint8_t reason; };
+static QueueHandle_t events=nullptr;
 
 static void startAP() {
-    if (apOn) return;
-    WiFi.mode(wifiSsid.length() ? WIFI_AP_STA : WIFI_AP);
-    if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
-        apOn = true;
-        sysLog("AP started " + WiFi.softAPIP().toString());
-    } else {
-        Serial.println("Failed to start Access Point!");
-    }
+    if(apOn) return;
+    WiFi.mode(wifiSsid.length()?WIFI_AP_STA:WIFI_AP);
+    if(WiFi.softAP(AP_SSID,AP_PASSWORD)) {
+        apOn=true;
+        sysLog("AP started "+WiFi.softAPIP().toString());
+    } else Serial.println("Failed to start Access Point!");
 }
-
 static void stopAP() {
-    if (!apOn) return;
-    WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_STA);
-    apOn = false;
+    if(!apOn) return;
+    WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA); apOn=false;
     Serial.println("AP stopped");
 }
-
 static void startSTA() {
-    // An explicitly selected network stays selected. A missed boot scan must
-    // not silently connect the controller to a different saved household/office.
-    Serial.print("Connecting to Wi-Fi: ");
-    Serial.println(wifiSsid);
-    wl_status_t result=WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
-    lastStaAttempt = millis();
-    if(result==WL_CONNECT_FAILED) Serial.println("Wi-Fi start failed; retry scheduled");
+    uint32_t now=millis(); retry.started(now); ++attempts; startPending=false;
+    Serial.printf("Wi-Fi begin t=%lu attempt=%lu\n",now,attempts);
+    wl_status_t result=WiFi.begin(wifiSsid.c_str(),wifiPass.c_str());
+    Serial.printf("Wi-Fi begin result t=%lu status=%d\n",millis(),int(result));
+    if(result==WL_CONNECT_FAILED) retry.failed(millis());
 }
-
-static bool anyNetworkConfigured() {
-    // Clearing the saved SSID explicitly selects AP-only mode.
-    return wifiSsid.length() > 0;
-}
-
-static void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
-    static unsigned long lastLog = 0;
-    if (event != ARDUINO_EVENT_WIFI_STA_DISCONNECTED) return;
-    if (millis() - lastLog < 10000) return;  // one line per attempt burst
-    lastLog = millis();
-    uint8_t r = info.wifi_sta_disconnected.reason;
-    const char* why = r == 201 ? "no AP found" : r == 15 ? "wrong password (handshake timeout)" : r == 202 ? "auth fail" : r == 2 ? "auth expire" : r == 8 ? "assoc leave" : "";
-    Serial.println("Wi-Fi STA disconnected, reason " + String(r) + " " + why);
-}
-
-void netBegin() {
-    WiFi.onEvent(onWifiEvent);
-    WiFi.persistent(false);  // credentials live in config-v3.json
-    WiFi.setAutoReconnect(false);
-    WiFi.setSleep(false);    // modem sleep adds 100-300 ms to every HTTP request
-    WiFi.setHostname("zver-l8");
-    if (!anyNetworkConfigured()) {
-        startAP();
-        return;
+static void onWifiEvent(WiFiEvent_t id,WiFiEventInfo_t info) {
+    // Only queue from the event task. Logs/state changes run on the main loop;
+    // no flash writes or suppressed early disconnect reasons in this callback.
+    switch(id) {
+        case ARDUINO_EVENT_WIFI_STA_START: case ARDUINO_EVENT_WIFI_STA_STOP:
+        case ARDUINO_EVENT_WIFI_STA_CONNECTED: case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP: case ARDUINO_EVENT_WIFI_STA_LOST_IP:
+        case ARDUINO_EVENT_WIFI_AP_STACONNECTED: case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED:
+            break;
+        default:return;
     }
-    WiFi.mode(WIFI_STA);
-    staDownSince = millis();
-    startSTA();
+    NetEvent event{id,millis(),uint8_t(id==ARDUINO_EVENT_WIFI_STA_DISCONNECTED?info.wifi_sta_disconnected.reason:0)};
+    if(events) xQueueSend(events,&event,0);
 }
-
-void netReconnect() {
-    if (!anyNetworkConfigured()) {
-        WiFi.disconnect();
-        startAP();
-        return;
-    }
-    if (!apOn) WiFi.mode(WIFI_STA);
-    staDownSince = millis();
-    startSTA();
-}
-
-void netTick() {
-    if (!anyNetworkConfigured()) return;
-    unsigned long now = millis();
-
-    if (WiFi.status() == WL_CONNECTED) {
-        if (staDownSince) {
-            staDownSince = 0;
-            sysLog("Wi-Fi connected " + WiFi.SSID() + " " + WiFi.localIP().toString());
-            if (MDNS.begin("zver-l8")) MDNS.addService("http", "tcp", 80);
+static void consumeEvents() {
+    NetEvent event;
+    while(events && xQueueReceive(events,&event,0)==pdTRUE) {
+        Serial.printf("Wi-Fi event t=%lu %s",event.at,WiFi.eventName(event.id));
+        if(event.id==ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+            lastReason=event.reason;
+            Serial.printf(" reason=%u (%s)",event.reason,WiFi.disconnectReasonName((wifi_err_reason_t)event.reason));
         }
-        stopAP();
+        Serial.println();
+        switch(event.id) {
+            case ARDUINO_EVENT_WIFI_STA_CONNECTED: retry.associated(event.at); break;
+            case ARDUINO_EVENT_WIFI_STA_GOT_IP: retry.online(event.at); break;
+            case ARDUINO_EVENT_WIFI_STA_LOST_IP: retry.associated(event.at); break;
+            case ARDUINO_EVENT_WIFI_STA_STOP: retry.failed(event.at); break;
+            case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+                retry.disconnected(event.at,event.reason==WIFI_REASON_ASSOC_LEAVE); break;
+            default:break;
+        }
+    }
+}
+void netBegin() {
+    events=xQueueCreate(32,sizeof(NetEvent));
+    WiFi.onEvent(onWifiEvent);
+    WiFi.persistent(false); WiFi.setAutoReconnect(false);
+    WiFi.setSleep(false); WiFi.setHostname("zver-l8");
+    downSince=millis();
+    if(!wifiSsid.length() || !events) { startAP(); return; }
+    WiFi.mode(WIFI_STA);
+    // Wait for STA_START instead of beginning while the interface is starting.
+    startPending=true;
+}
+void netReconnect() {
+    WiFi.disconnect(false,false);
+    retry.stopping(millis()); downSince=millis(); wasConnected=false;
+    startPending=wifiSsid.length()>0;
+    if(!startPending) { WiFi.mode(WIFI_AP); startAP(); }
+    else WiFi.enableSTA(true);
+}
+void netTick() {
+    consumeEvents();
+    if(!wifiSsid.length() || !events) return;
+    uint32_t now=millis();
+    if(retry.phase==l8net::Phase::Stopping) {
+        // disconnect() has been issued explicitly. Allow its event to arrive
+        // before starting again; a missing event must not wedge reconnection.
+        if(now-retry.since<2000) return;
+        retry.failed(now);
+    }
+    if(startPending) {
+        if(WiFi.getStatusBits()&STA_STARTED_BIT) startSTA();
         return;
     }
-
-    if (!staDownSince) {
-        staDownSince = now;
-        sysLog(F("Wi-Fi lost"));
+    if(WiFi.status()==WL_CONNECTED) {
+        if(!wasConnected) {
+            wasConnected=true; retry.online(now);
+            sysLog("Wi-Fi connected "+WiFi.SSID()+" "+WiFi.localIP().toString());
+            if(MDNS.begin("zver-l8")) MDNS.addService("http","tcp",80);
+        }
+        // Finish an AP editing session before removing its network.
+        if(!apOn || !WiFi.softAPgetStationNum()) stopAP();
+        return;
     }
-    if (!apOn && now - staDownSince >= STA_TIMEOUT) startAP();
-    if (now - lastStaAttempt >= STA_RETRY) startSTA();
+    if(wasConnected) { wasConnected=false; downSince=now; sysLog(F("Wi-Fi lost")); }
+    // Association and DHCP are distinct. WL_CONNECTED means IP is assigned;
+    // its absence alone is not permission to restart an ongoing attempt.
+    if(WiFi.getStatusBits()&STA_CONNECTED_BIT) retry.associated(now);
+    if(!apOn && now-downSince>=AP_DELAY) startAP();
+    auto action=retry.next(now,apOn,apOn?WiFi.softAPgetStationNum():0);
+    if(action==l8net::Action::Cancel) {
+        Serial.printf("Wi-Fi attempt timeout t=%lu phase=%d; disconnecting\n",now,int(retry.phase));
+        retry.stopping(now); WiFi.disconnect(false,false);
+    } else if(action==l8net::Action::Start) startSTA();
 }
-
 bool netApOn() { return apOn; }
-
+const char* netPhase() {
+    if(!wifiSsid.length()) return "ap_only";
+    switch(retry.phase) {
+        case l8net::Phase::Idle:return "idle";
+        case l8net::Phase::Connecting:return "associating";
+        case l8net::Phase::Address:return "dhcp";
+        case l8net::Phase::Online:return "online";
+        case l8net::Phase::Failed:return "retry_wait";
+        case l8net::Phase::Stopping:return "disconnecting";
+    }
+    return "unknown";
+}
+uint32_t netAttempts() { return attempts; }
+uint8_t netLastDisconnectReason() { return lastReason; }
 String netStatusString() {
-    if (WiFi.status() == WL_CONNECTED) return "STA " + WiFi.SSID() + " " + WiFi.localIP().toString();
-    if (apOn) return "AP " + WiFi.softAPIP().toString();
-    return anyNetworkConfigured() ? "connecting" : "idle";
+    if(WiFi.status()==WL_CONNECTED) return "STA "+WiFi.SSID()+" "+WiFi.localIP().toString();
+    if(apOn) return "AP "+WiFi.softAPIP().toString();
+    return wifiSsid.length()?"connecting":"idle";
 }
-
 String netStaString() {
-    if (WiFi.status() != WL_CONNECTED) return "-";
-    return WiFi.localIP().toString() + "   rssi " + String(WiFi.RSSI()) + " dBm";
+    if(WiFi.status()!=WL_CONNECTED) return "-";
+    return WiFi.localIP().toString()+"   rssi "+String(WiFi.RSSI())+" dBm";
 }
-
-String netApString() {
-    return apOn ? String(AP_SSID) + "   " + WiFi.softAPIP().toString() : String("off");
-}
+String netApString() { return apOn?String(AP_SSID)+"   "+WiFi.softAPIP().toString():String("off"); }

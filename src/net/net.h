@@ -15,6 +15,9 @@ void netBegin();
 void netTick();
 void netReconnect();
 bool netApOn();
+const char* netPhase();
+uint32_t netAttempts();
+uint8_t netLastDisconnectReason();
 String netStatusString();  // mode + ssid + ip
 String netStaString();     // ip + rssi or "-"
 String netApString();      // ap ssid + ip or "off"

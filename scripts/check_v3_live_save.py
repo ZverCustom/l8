@@ -33,7 +33,7 @@ def status(on,outputs=True):
  return v
 try:
  s.open();time.sleep(8);original=cmd({'cmd':'get_config'});st=cmd({'cmd':'status'})
- check('expected firmware',st['firmware']=='0.3.3-dev')
+ check('expected firmware',st['firmware']=='0.3.4-dev')
  for _ in range(12):
   if st['otaConfirmed']:break
   time.sleep(1);st=cmd({'cmd':'status'})

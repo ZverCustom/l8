@@ -8,3 +8,5 @@
 src/config/secrets.h
 enclosure/.venv/
 enclosure/out/
+__pycache__/
+*.py[cod]

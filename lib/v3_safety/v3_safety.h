@@ -4,6 +4,9 @@
 #include <power_latch.h>
 #include "channel_map.h"
 namespace v3 {
+inline bool hubInhibited(bool bootConfirmed,bool updating,bool uploaded,bool rebootPending) {
+    return !bootConfirmed || updating || uploaded || rebootPending;
+}
 constexpr uint16_t SAFE = 0x2000; // only CAN_S high
 inline float currentAmps(float volts) { return volts * 5450.0f / 1200.0f; }
 inline uint16_t senseSelect(unsigned channel) {
