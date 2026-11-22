@@ -58,12 +58,16 @@ struct Channel {
             // frame one reduction while retaining the full 50 ms fault filter.
             // 7.3 A is the nominal current at the 1.6 V boundary, not a measured
             // fault current. Never repeatedly dim against the same pending frame.
-            over=false; healthy=false;
+            // Limit is at most 5 A, so high IS is always over the limit: keep the
+            // overload timer running, or IS noise around 1.6 V resets both filters.
+            healthy=false;
             if(!switchHigh) {
                 switchHigh=true; switchAt=now;
                 dimmer.scale*=fminf(1.f,limit*.9f/7.3f);
             }
+            if(!over) { over=true; overAt=now; }
             if(now-switchAt>=SWITCH_MS) trip(Switch,now,false);
+            else if(now-overAt>=100) trip(Overcurrent,now,autoRetry);
             return;
         }
         switchHigh=false;
