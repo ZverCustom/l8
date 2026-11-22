@@ -22,7 +22,6 @@ void finite_retries() {
 }
 void hard_faults_do_not_retry() {
     Channel c; c.enabled(0); c.sample(10,8,1.6,3,true); c.sample(59,8,1.6,3,true); TEST_ASSERT_EQUAL(Channel::None,c.fault); c.sample(60,8,1.6,3,true); TEST_ASSERT_EQUAL(Channel::Switch,c.fault); TEST_ASSERT_FALSE(c.ready(999999,true,true));
-    c.reset(); c.sample(0,6,1.3,3,true); TEST_ASSERT_EQUAL(Channel::Spike,c.fault); TEST_ASSERT_FALSE(c.waiting);
     c.reset(); c.sample(0,NAN,0,3,true); TEST_ASSERT_EQUAL(Channel::InvalidSample,c.fault);
 }
 void interlocks_and_wrap() {
@@ -66,7 +65,7 @@ void startup_and_every_retry_allow_inrush() {
         else { TEST_ASSERT_FALSE(c.waiting);TEST_ASSERT_FALSE(c.ready(on+999999,true,true)); }
     }
 }
-void switch_noise_resets_debounce_and_does_not_become_spike() {
+void switch_noise_resets_debounce_without_current_trip() {
     Channel c;c.enabled(0);
     c.sample(10,8,1.7,3,true);c.sample(59,8,1.7,3,true);TEST_ASSERT_EQUAL(Channel::None,c.fault);
     c.sample(60,1,.22,3,true);c.sample(70,8,1.7,3,true);c.sample(119,8,1.7,3,true);TEST_ASSERT_EQUAL(Channel::None,c.fault);
@@ -76,7 +75,8 @@ void startup_boundary_wrap_and_manual_cycles() {
     Channel c;
     for(uint32_t n=0;n<30;++n) { uint32_t t=0xfffffff0u+n*100u;c.off();c.enabled(t);c.sample(t+9,8,1.4,3,true);c.sample(t+10,1,.22,3,true);TEST_ASSERT_EQUAL(Channel::None,c.fault); }
     c.off();c.enabled(0xfffffffbu);c.sample(4,8,1.4,3,true);TEST_ASSERT_EQUAL(Channel::None,c.fault);
-    c.sample(5,8,1.4,3,true);TEST_ASSERT_EQUAL(Channel::Spike,c.fault);TEST_ASSERT_FALSE(c.waiting);
+    c.sample(5,8,1.4,3,true);TEST_ASSERT_EQUAL(Channel::None,c.fault);
+    c.sample(105,8,1.4,3,true);TEST_ASSERT_EQUAL(Channel::Overcurrent,c.fault);TEST_ASSERT_TRUE(c.waiting);
     c.reset();c.enabled(0);c.sample(0,NAN,0,3,true);TEST_ASSERT_EQUAL(Channel::InvalidSample,c.fault);
 }
 void actual_channel_protections_are_independent() {
@@ -85,4 +85,35 @@ void actual_channel_protections_are_independent() {
     for(int i=0;i<8;++i){channels[i].sample(10,i==6?6:1,.3,5,true);channels[i].sample(110,i==6?6:1,.3,5,true);TEST_ASSERT_EQUAL(i==6?Channel::Overcurrent:Channel::None,channels[i].fault);}
     channels[6].reset();TEST_ASSERT_EQUAL(Channel::None,channels[6].fault);
 }
-int main(){ UNITY_BEGIN(); RUN_TEST(startup_and_every_retry_allow_inrush); RUN_TEST(switch_noise_resets_debounce_and_does_not_become_spike); RUN_TEST(startup_boundary_wrap_and_manual_cycles); RUN_TEST(actual_channel_protections_are_independent); RUN_TEST(dim_before_trip); RUN_TEST(measured_feedback_with_render_delay); RUN_TEST(finite_retries); RUN_TEST(hard_faults_do_not_retry); RUN_TEST(interlocks_and_wrap); RUN_TEST(healthy_budget_reset); RUN_TEST(resistive_load_falls_back_to_trip); return UNITY_END(); }
+void black_to_white_and_flashes_regulate_without_trip() {
+    for(int frameMs:{16,25,40}) for(int offset=0;offset<frameMs;++offset) for(float demand:{6.f,6.2f,7.f}) {
+        Channel c;c.enabled(0);float amps=.1f;
+        for(uint32_t t=0;t<=1600;++t) {
+            if((t+offset)%frameMs==0) {
+                bool white=t>=100 && (t<800 || (t/100)%2==0);
+                amps=.1f+(white?(demand-.1f)*c.dimmer.scale:0);
+            }
+            if(t%5==0) {
+                c.sample(t,amps,amps*1200.f/5450.f,3,true);
+                TEST_ASSERT_EQUAL(Channel::None,c.fault);TEST_ASSERT_EQUAL(0,c.retries);
+                if(t>=200 && t<800) TEST_ASSERT_LESS_THAN_FLOAT(3,amps);
+            }
+        }
+        TEST_ASSERT_GREATER_THAN_FLOAT(0,c.dimmer.scale);TEST_ASSERT_LESS_THAN_FLOAT(1,c.dimmer.scale);
+    }
+}
+void large_uncontrollable_load_uses_finite_overload_retries() {
+    Channel c;uint32_t now=0;
+    for(int attempt=0;attempt<4;++attempt) {
+        c.enabled(now);now+=10;
+        for(int t=0;t<100;t+=5){c.sample(now+t,6,1.32,3,true);TEST_ASSERT_EQUAL(Channel::None,c.fault);}
+        now+=100;c.sample(now,6,1.32,3,true);TEST_ASSERT_EQUAL(Channel::Overcurrent,c.fault);
+        if(attempt<3) {now+=c.delayMs();TEST_ASSERT_TRUE(c.ready(now,true,true));}
+        else {TEST_ASSERT_FALSE(c.waiting);TEST_ASSERT_FALSE(c.ready(now+100000,true,true));}
+    }
+}
+void large_overload_respects_disabled_auto_retry() {
+    Channel c;c.enabled(0);c.sample(10,6,1.32,3,false);c.sample(110,6,1.32,3,false);
+    TEST_ASSERT_EQUAL(Channel::Overcurrent,c.fault);TEST_ASSERT_FALSE(c.waiting);TEST_ASSERT_FALSE(c.ready(999999,false,true));
+}
+int main(){ UNITY_BEGIN(); RUN_TEST(large_overload_respects_disabled_auto_retry); RUN_TEST(black_to_white_and_flashes_regulate_without_trip); RUN_TEST(large_uncontrollable_load_uses_finite_overload_retries); RUN_TEST(startup_and_every_retry_allow_inrush); RUN_TEST(switch_noise_resets_debounce_without_current_trip); RUN_TEST(startup_boundary_wrap_and_manual_cycles); RUN_TEST(actual_channel_protections_are_independent); RUN_TEST(dim_before_trip); RUN_TEST(measured_feedback_with_render_delay); RUN_TEST(finite_retries); RUN_TEST(hard_faults_do_not_retry); RUN_TEST(interlocks_and_wrap); RUN_TEST(healthy_budget_reset); RUN_TEST(resistive_load_falls_back_to_trip); return UNITY_END(); }

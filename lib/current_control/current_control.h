@@ -4,25 +4,32 @@
 namespace l8power {
 // Real measured current, independent of LED model/voltage and requested brightness.
 struct Dimmer {
-    float scale=1; uint32_t last=0; bool sampled=false;
+    float scale=1; uint32_t last=0; bool sampled=false, surge=false;
     void update(uint32_t now,float amps,float limit) {
         float dt=sampled?fminf((now-last)/1000.f,.1f):.005f; sampled=true; last=now;
-        if(limit<=0) { scale=1; return; }
+        if(limit<=0) { scale=1; surge=false; return; }
         const float target=limit*.90f;
-        if(amps>target) scale*=1-fminf(1.f,dt/.04f)*(1-target/amps);
+        if(amps<limit) surge=false;
+        // A bright animation edge can demand 2x the limit. Make a fast initial
+        // correction, then let normal feedback settle; do not classify it as a
+        // short. One correction per surge avoids repeatedly multiplying against
+        // an unchanged measurement while the next LED frame is still pending.
+        if(amps>=2*limit && !surge) { scale*=target/amps; surge=true; }
+        else if(amps>target) scale*=1-fminf(1.f,dt/.04f)*(1-target/amps);
         else if(amps<limit*.82f) scale+=dt*.10f;
         scale=fmaxf(0.f,fminf(1.f,scale));
     }
 };
 struct Channel {
-    enum Fault:uint8_t { None=0, Overcurrent=1, Switch=2, Spike=3, InvalidSample=4 };
+    // Fault code 3 (instantaneous current Spike) retired; current alone is not a short diagnosis.
+    enum Fault:uint8_t { None=0, Overcurrent=1, Switch=2, InvalidSample=4 };
     static constexpr uint32_t INRUSH_MS=10, SWITCH_MS=50;
     Dimmer dimmer;
     Fault fault=None; uint8_t retries=0; bool waiting=false;
     uint32_t tripped=0, overAt=0, healthyAt=0, enabledAt=0, switchAt=0;
     bool over=false, healthy=false, switchHigh=false, poweringUp=false;
     void reset() { *this=Channel{}; }
-    void off() { over=false; healthy=false; switchHigh=false; poweringUp=false; dimmer.sampled=false; }
+    void off() { over=false; healthy=false; switchHigh=false; poweringUp=false; dimmer.sampled=false; dimmer.surge=false; }
     // Called only after the physical IN write succeeds, on each OFF -> ON.
     void enabled(uint32_t now) { off(); enabledAt=now; poweringUp=true; }
     bool ready(uint32_t now,bool autoRetry,bool permitted) {
@@ -48,14 +55,15 @@ struct Channel {
         poweringUp=false;
         if(volts>=1.6f) {
             // IS is a diagnostic signal here, not a current measurement. Do not
-            // bypass this debounce with Spike derived from the same voltage.
+            // feed a current regulator with a switch diagnostic voltage.
             over=false; healthy=false;
             if(!switchHigh) { switchHigh=true; switchAt=now; }
             if(now-switchAt>=SWITCH_MS) trip(Switch,now,false);
             return;
         }
         switchHigh=false;
-        if(amps>=fmaxf(limit*2.f,limit+1.f)) { trip(Spike,now,false); return; }
+        // Every valid current sample, including a large step, gets the same
+        // 100 ms regulation opportunity and bounded overload recovery below.
         dimmer.update(now,amps,limit);
         if(amps>limit) {
             healthy=false;

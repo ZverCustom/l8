@@ -25,7 +25,7 @@ void powerInhibit(bool value) { portENTER_CRITICAL(&stateMux); request.inhibit=v
 void powerCanSilent(bool value) { portENTER_CRITICAL(&stateMux); request.silent=value; portEXIT_CRITICAL(&stateMux); }
 void powerResetLatch(int ch) { portENTER_CRITICAL(&stateMux); resetMask |= ch<0 ? 0x1ff : (ch<8 ? (1u<<ch) : 0); portEXIT_CRITICAL(&stateMux); }
 void powerSampleAdc() {}
-const char* powerFaultName(uint8_t v) { return v==1 ? "overcurrent" : v==2 ? "switch fault" : v==3 ? "current spike" : v==4 ? "invalid sample" : ""; }
+const char* powerFaultName(uint8_t v) { return v==1 ? "overcurrent" : v==2 ? "switch fault" : v==4 ? "invalid sample" : ""; }
 void powerTick() {
     Request next;
     next.master=drive.masterOn; next.autoRetry=savedData.autoRetry; next.totalMaxAmps=drive.powerLimitMa/1000.f;

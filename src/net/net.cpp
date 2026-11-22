@@ -26,7 +26,8 @@ static l8net::BootAttempts bootAttempts;
 static bool bootRetryPending=false;
 static std::atomic<uint32_t> droppedEvents{0};
 
-struct NetEvent { WiFiEvent_t id; uint32_t at; uint8_t reason; };
+static l8net::CoreRetry coreRetry; // event task only; never reset on a new begin
+struct NetEvent { WiFiEvent_t id; uint32_t at; uint8_t reason; bool coreWillRetry; };
 static QueueHandle_t events=nullptr;
 
 static void startAP() {
@@ -43,12 +44,13 @@ static void startSTA() {
     Serial.printf("Wi-Fi begin t=%lu attempt=%lu\n",now,attempts);
     wl_status_t result=WiFi.begin(sessionSsid.c_str(),sessionPass.c_str(),selected?selectedChannel:0,selected?selectedBssid:nullptr);
     Serial.printf("Wi-Fi begin result t=%lu status=%d\n",millis(),int(result));
-    // Even an immediate failure retains the one-session deadline; the core
-    // may already be starting its own first retry. No second begin is issued.
+    // Disconnect events resolve failures; deadlines still cover lost events
+    // and hung attempts. Do not issue a second begin based on this return alone.
 }
 static void onWifiEvent(WiFiEvent_t id,WiFiEventInfo_t info) {
-    // Only queue from the event task. Logs/state changes run on the main loop;
-    // no flash writes or suppressed early disconnect reasons in this callback.
+    // Queue from the event task. Logs/session transitions run on the main loop;
+    // no flash writes here. Annotate the core retry before queuing, including
+    // events that cannot fit in the queue.
     switch(id) {
         case ARDUINO_EVENT_WIFI_STA_START: case ARDUINO_EVENT_WIFI_STA_STOP:
         case ARDUINO_EVENT_WIFI_STA_CONNECTED: case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
@@ -57,7 +59,8 @@ static void onWifiEvent(WiFiEvent_t id,WiFiEventInfo_t info) {
             break;
         default:return;
     }
-    NetEvent event{id,millis(),uint8_t(id==ARDUINO_EVENT_WIFI_STA_DISCONNECTED?info.wifi_sta_disconnected.reason:0)};
+    NetEvent event{id,millis(),uint8_t(id==ARDUINO_EVENT_WIFI_STA_DISCONNECTED?info.wifi_sta_disconnected.reason:0),false};
+    if(id==ARDUINO_EVENT_WIFI_STA_DISCONNECTED) event.coreWillRetry=coreRetry.onDisconnect(event.reason==WIFI_REASON_ASSOC_LEAVE);
     if(events && xQueueSend(events,&event,0)!=pdTRUE) droppedEvents.fetch_add(1,std::memory_order_relaxed);
 }
 static void consumeEvents() {
@@ -75,10 +78,11 @@ static void consumeEvents() {
             Serial.printf(" reason=%u (%s)",event.reason,WiFi.disconnectReasonName((wifi_err_reason_t)event.reason));
         }
         Serial.println();
+        if(event.id==ARDUINO_EVENT_WIFI_STA_DISCONNECTED) session.disconnected(event.at,event.reason==WIFI_REASON_ASSOC_LEAVE,event.coreWillRetry);
         if(event.id==ARDUINO_EVENT_WIFI_AP_STACONNECTED) bootAttempts.stop();
         // Ignore delayed events from a stopped/scan session. A voluntary
         // disconnect may also be generated inside the core's first retry;
-        // association keeps its original deadline instead of calling begin again.
+        // that voluntary event must not fail the core retry or restart its deadline.
         bool active=session.phase==l8net::Session::Associating || session.phase==l8net::Session::Dhcp || session.phase==l8net::Session::Online;
         if(active && event.id==ARDUINO_EVENT_WIFI_STA_CONNECTED) session.enter(l8net::Session::Dhcp,event.at);
         if(active && event.id==ARDUINO_EVENT_WIFI_STA_LOST_IP) session.enter(l8net::Session::Dhcp,event.at);
@@ -108,7 +112,7 @@ void netReconnect() {
     WiFi.disconnect(false,false); wasConnected=false;
     if(!wifiSsid.length()) { apOnly(); return; }
     WiFi.enableSTA(true); selected=false; startPending=true;
-    session.enter(l8net::Session::Stopping,millis());
+    session.stopping(millis());
 }
 void netTick() {
     if(apOn) dns.processNextRequest();
@@ -133,7 +137,7 @@ void netTick() {
     if(startPending) {
         if(bootRetryPending && !bootAttempts.retryAllowed()) { apOnly(); return; }
         if(now-session.since>7000) { apOnly(); return; }
-        if(session.phase==l8net::Session::Stopping && now-session.since<2000) return;
+        if(!session.restartReady(now)) return;
         if(WiFi.getStatusBits()&STA_STARTED_BIT) { startSTA(); startAP(); }
         return;
     }
@@ -153,12 +157,13 @@ void netTick() {
         MDNS.end(); apOnly(); return;
     }
     if(associated) session.enter(l8net::Session::Dhcp,now);
-    if(session.expired(now)) {
+    if(session.phase==l8net::Session::Failed || session.expired(now)) {
+        bool failed=session.phase==l8net::Session::Failed;
         if(bootAttempts.retryAllowed()) {
-            sysLog(F("Wi-Fi boot attempt timed out; bounded retry after disconnect"));
-            session.enter(l8net::Session::Stopping,now); WiFi.disconnect(false,false);
+            sysLog(failed?F("Wi-Fi boot attempt failed; retry after 2 s disconnect"):F("Wi-Fi boot attempt timed out; retry after 2 s disconnect"));
+            session.stopping(now); WiFi.disconnect(false,false);
             startPending=true; bootRetryPending=true;
-        } else { sysLog(F("Wi-Fi attempt timed out; AP only")); apOnly(); }
+        } else { sysLog(failed?F("Wi-Fi attempt failed; AP only"):F("Wi-Fi attempt timed out; AP only")); apOnly(); }
     }
 }
 bool netApOn() { return apOn; }
@@ -171,6 +176,7 @@ const char* netPhase() {
         case l8net::Session::Dhcp:return "dhcp";
         case l8net::Session::Online:return "online";
         case l8net::Session::Stopping:return "disconnecting";
+        case l8net::Session::Failed:return "failed";
     }
     return "unknown";
 }
