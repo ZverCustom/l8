@@ -1,0 +1,215 @@
+{
+  "sourceCommit": "5276174146f071b8d5fc7b04e1314f25931aee89",
+  "sourceTreeCleanAtBuild": true,
+  "builds": [
+    {
+      "environment": "l8_v3",
+      "version": "0.4.0+5276174",
+      "bytes": 957648,
+      "sha256": "4da96d3961ff37e3af43545f623572959e2e6aacfe4a72b462c138865359f95f",
+      "flashed": true
+    },
+    {
+      "environment": "l8_v3_dma",
+      "version": "0.4.0+5276174",
+      "bytes": 950576,
+      "sha256": "0515a6b4f1fcc41971e94abb95f442f3005bbcf440da1b1a39dd24f0fa22a58d",
+      "flashed": false
+    },
+    {
+      "environment": "l8_v3_dma_flash",
+      "version": "0.4.0+5276174",
+      "bytes": 950544,
+      "sha256": "0c44bcbbe36ec6794186ea89cff99f9666a35b6f566ddc01313c3152135594e4",
+      "flashed": false
+    }
+  ],
+  "date": "2026-11-23",
+  "baseCommit": "40d0c42",
+  "currentControlCommit": "4f9b080",
+  "tests": {
+    "native": 54,
+    "native_settings": 8,
+    "pythonScanPatch": 2,
+    "linkedIdentity": "passed",
+    "usbRegression": 47,
+    "usbPreview": 32
+  },
+  "hardware": {
+    "power": "USB only",
+    "vbatVolts": 0,
+    "ledBackend": "rmt",
+    "loadTested": false,
+    "initialFirmware": "0.3.3-dev"
+  },
+  "migration": {
+    "exactExpectedConfig": true,
+    "sourceSchema": 4,
+    "targetSchema": 5
+  },
+  "usbChecks": [
+    "USB-only test precondition",
+    "healthy safe boot",
+    "safe configuration",
+    "schema 5 / eight strips / three inputs",
+    "Wi-Fi password redacted",
+    "reject wrong schema",
+    "atomic reject wrong schema",
+    "reject invalid IGN policy",
+    "atomic reject invalid IGN policy",
+    "reject missing strip",
+    "atomic reject missing strip",
+    "reject excessive current limit",
+    "atomic reject excessive current limit",
+    "reject invalid current calibration",
+    "atomic reject invalid current calibration",
+    "reject invalid input range",
+    "atomic reject invalid input range",
+    "reject out of bounds center",
+    "atomic reject out of bounds center",
+    "reject invalid preset content",
+    "atomic reject invalid preset content",
+    "reject action {'action': 'master', 'on': 'true'}",
+    "reject action {'action': 'reset', 'channel': 8}",
+    "reject action {'action': 'preset_load', 'slot': 9}",
+    "reject action {'action': 'nonexistent'}",
+    "apply IGN policy False",
+    "read back IGN policy False",
+    "enable Master on USB",
+    "USB blocks strip power regardless of IGN policy False",
+    "disable Master on USB",
+    "apply IGN policy True",
+    "read back IGN policy True",
+    "enable Master on USB",
+    "USB blocks strip power regardless of IGN policy True",
+    "disable Master on USB",
+    "apply config",
+    "read back config",
+    "save preset",
+    "preset contains eight strips",
+    "apply temporary change",
+    "load preset",
+    "preset restored brightness",
+    "restore initial config",
+    "reboot command",
+    "config persists after reboot",
+    "safe healthy reboot",
+    "oversize line discarded through newline"
+  ],
+  "previewChecks": [
+    "Master preserved False",
+    "USB keeps all outputs and DATA off",
+    "schema 5 and ready",
+    "Master ON",
+    "Master preserved True",
+    "USB keeps all outputs and DATA off",
+    "preview accepted without Master reset",
+    "Master preserved True",
+    "USB keeps all outputs and DATA off",
+    "preview active",
+    "uncommitted export retains baseline",
+    "second editor cannot save",
+    "stale revision cannot save",
+    "explicit save preserves Master",
+    "Master preserved True",
+    "USB keeps all outputs and DATA off",
+    "explicit save commits only patch",
+    "next preview accepted",
+    "discard accepted with Master on",
+    "Master preserved True",
+    "USB keeps all outputs and DATA off",
+    "discard restores saved settings",
+    "full restore preserves Master",
+    "Master preserved True",
+    "USB keeps all outputs and DATA off",
+    "Master OFF",
+    "original config restored",
+    "reboot",
+    "original config survives reboot",
+    "Master preserved False",
+    "USB keeps all outputs and DATA off",
+    "healthy after reboot"
+  ],
+  "previewUsbTimings": [
+    {
+      "cmd": "preview",
+      "ms": 21.03
+    },
+    {
+      "cmd": "save",
+      "ms": 2.65
+    },
+    {
+      "cmd": "save",
+      "ms": 1.81
+    },
+    {
+      "cmd": "save",
+      "ms": 112.24
+    },
+    {
+      "cmd": "preview",
+      "ms": 13.59
+    },
+    {
+      "cmd": "discard",
+      "ms": 3.56
+    }
+  ],
+  "boots": [
+    {
+      "boot": 1,
+      "scanCompleteUptimeMs": 5127,
+      "networksFound": 2,
+      "scanPhaseMs": 2596,
+      "gotIpUptimeMs": 9130,
+      "explicitBeginCount": 1,
+      "disconnectReasons": [
+        201
+      ],
+      "droppedEvents": 0,
+      "safeOutputs": true
+    },
+    {
+      "boot": 2,
+      "scanCompleteUptimeMs": 5129,
+      "networksFound": 2,
+      "scanPhaseMs": 2597,
+      "gotIpUptimeMs": 8972,
+      "explicitBeginCount": 1,
+      "disconnectReasons": [
+        201
+      ],
+      "droppedEvents": 0,
+      "safeOutputs": true
+    },
+    {
+      "boot": 3,
+      "scanCompleteUptimeMs": 4919,
+      "networksFound": 1,
+      "scanPhaseMs": 2394,
+      "gotIpUptimeMs": 8914,
+      "explicitBeginCount": 1,
+      "disconnectReasons": [
+        201
+      ],
+      "droppedEvents": 0,
+      "safeOutputs": true
+    }
+  ],
+  "finalState": {
+    "master": false,
+    "allOutputsOff": true,
+    "allDataOff": true,
+    "otaConfirmed": true,
+    "configRestored": true,
+    "wifi": "online"
+  },
+  "pending": [
+    "Physical IS/current fault response, black-to-white with 12 V and longest strip",
+    "20-30 Master cycles and overload retry inrush under load",
+    "Root cause of first NO_AP_FOUND during boot association",
+    "Second involuntary disconnect then explicit 2-second boot retry on hardware",
+    "AP client interruption, slow DHCP, OTA failure, DMA and DMA+flash qualification"
+  ]
+}
