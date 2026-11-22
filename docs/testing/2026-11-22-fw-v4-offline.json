@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-22",
+  "sourceCommit": "33e4481d085793fac65c9773bfa857f0a0179de3",
+  "sourceTreeCleanAtBuild": true,
+  "baseCommit": "497b8e4",
+  "nativeTests": {
+    "logic": 45,
+    "actualSettingsWithFakeFS": 8,
+    "passed": 53
+  },
+  "uiCheck": "passed",
+  "incrementalBuildIdentity": "passed: dirty to clean transition recompiles hub/system and changes linked identity",
+  "artifacts": [
+    {
+      "environment": "l8_v3",
+      "path": ".pio/build/l8_v3/firmware.bin",
+      "version": "0.4.0+33e4481",
+      "bytes": 958128,
+      "sha256": "02d5bf93e2314558af41d759a67632734c7b77753cf3a94df21f16dcea600153",
+      "build": "passed",
+      "flashed": false
+    },
+    {
+      "environment": "l8_v3_dma",
+      "path": ".pio/build/l8_v3_dma/firmware.bin",
+      "version": "0.4.0+33e4481",
+      "bytes": 951024,
+      "sha256": "74a5b80a304fa7710c3d7775bfa71de22b8fee6ffb97391bb382dc9434ac3ebf",
+      "build": "passed",
+      "flashed": false
+    },
+    {
+      "environment": "l8_v3_dma_flash",
+      "path": ".pio/build/l8_v3_dma_flash/firmware.bin",
+      "version": "0.4.0+33e4481",
+      "bytes": 950992,
+      "sha256": "44f00c1bce71d16fa829bf08d1168760846cf14f4f2602f3e94e8c53df7e1cea",
+      "build": "passed",
+      "flashed": false
+    }
+  ],
+  "hardwareTested": false,
+  "hardwareReason": "No L8 USB serial port present; physical board and scope tests pending",
+  "clientPdf": {
+    "version": "0.3.4 / rev 0.6",
+    "changed": false
+  }
+}
