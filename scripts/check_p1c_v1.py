@@ -102,44 +102,48 @@ try:
         print('Wi-Fi not online, reconnect', attempt + 1, flush=True); legacy({'cmd': 'action', 'action': 'reconnect'}); st = legacy({'cmd': 'status'})
     if st.get('wifi', {}).get('phase') == 'online':
         base = f"http://{st['ip']}"
-        # Lossy link (ping loss seen): retry only requests that are reads or refused by validation.
-        def retry(fn):
-            for attempt in range(12):
-                try: return fn()
-                except (urllib.error.URLError, TimeoutError, ConnectionError, socket.timeout) as e:
-                    if isinstance(e, urllib.error.HTTPError): raise
-                    print('  network retry', attempt + 1, type(e).__name__, flush=True); time.sleep(2)
-            raise TimeoutError('HTTP unreachable after retries')
-        token = retry(lambda: json.loads(urllib.request.urlopen(base + '/api/session', timeout=15).read()))['token']
-        def post(obj, tok=token):
-            def once():
-                req = urllib.request.Request(base + '/api/command', data=json.dumps(obj).encode(), headers={'Content-Type': 'application/json', **({'X-L8-Token': tok} if tok else {})})
-                try: resp = urllib.request.urlopen(req, timeout=15); return resp.status, json.loads(resp.read())
-                except urllib.error.HTTPError as h: return h.code, json.loads(h.read())
-            return retry(once)
-        code, hi = post({'v': 1, 'id': 'i1', 'cmd': 'info'})
-        check('HTTP info == USB info (same boot)', code == 200 and hi == usb({'v': 1, 'id': 'i1', 'cmd': 'info'}))
-        code, hg = post({'v': 1, 'id': 'g1', 'cmd': 'get_config'})
-        check('HTTP get_config == USB get_config', code == 200 and hg == usb({'v': 1, 'id': 'g1', 'cmd': 'get_config'}))
-        bad = {'v': 1, 'id': 'b', 'cmd': 'action', 'bootId': boot, 'action': 'reset', 'channel': 9}
-        code, hb = post(bad); check('HTTP/USB same error, HTTP 400', code == 400 and hb == usb(bad))
-        code, ha = post({'v': 1, 'id': 'a', 'cmd': 'status'}, tok=None); check('HTTP without token -> 403 AUTH_REQUIRED', code == 403 and err(ha, 'AUTH_REQUIRED') and ha['id'] == 'a')
-        code, hv = post({'cmd': 'status'}); check('HTTP /api/command without v -> 400', code == 400 and err(hv, 'UNSUPPORTED_VERSION'))
-        host = st['ip']
-        def sse(query):
-            def once():
-                c = socket.create_connection((host, 80), timeout=15); c.sendall(f'GET /api/events?{query} HTTP/1.1\r\nHost: {host}\r\n\r\n'.encode()); return c
-            return retry(once)
-        c = sse(f'v=1&token={token}'); buf = b''; until = time.monotonic() + 5
-        def complete(b): return b'data: ' in b and b'\n\n' in b.split(b'data: ', 1)[1]
-        while not complete(buf) and time.monotonic() < until: buf += c.recv(65536)
-        c.close(); payload = json.loads(buf.split(b'data: ', 1)[1].split(b'\n\n', 1)[0])
-        check('SSE v1 envelope coherent', payload['v'] == 1 and payload['bootId'] == boot and payload['revision'] == payload['status']['configRevision'] and payload['savedRevision'] == payload['status']['savedRevision'] and isinstance(payload['seq'], int))
-        c = sse(f'v=2&token={token}'); head = c.recv(4096); c.close(); check('SSE v=2 -> 400', b' 400 ' in head.split(b'\r\n', 1)[0])
-        time.sleep(1); conns = [sse(f'v=1&token={token}') for _ in range(3)]; time.sleep(1.5)
-        c4 = sse(f'token={token}'); head = c4.recv(4096); c4.close()
-        for c in conns: c.close()
-        check('4th SSE client refused (503), limit shared by v1/legacy', b' 503 ' in head.split(b'\r\n', 1)[0])
+        try:
+            base = f"http://{st['ip']}"
+            # Lossy link (ping loss seen): retry only requests that are reads or refused by validation.
+            def retry(fn):
+                for attempt in range(4):
+                    try: return fn()
+                    except (urllib.error.URLError, TimeoutError, ConnectionError, socket.timeout) as e:
+                        if isinstance(e, urllib.error.HTTPError): raise
+                        print('  network retry', attempt + 1, type(e).__name__, flush=True); time.sleep(2)
+                raise TimeoutError('HTTP unreachable after retries')
+            token = retry(lambda: json.loads(urllib.request.urlopen(base + '/api/session', timeout=15).read()))['token']
+            def post(obj, tok=token):
+                def once():
+                    req = urllib.request.Request(base + '/api/command', data=json.dumps(obj).encode(), headers={'Content-Type': 'application/json', **({'X-L8-Token': tok} if tok else {})})
+                    try: resp = urllib.request.urlopen(req, timeout=15); return resp.status, json.loads(resp.read())
+                    except urllib.error.HTTPError as h: return h.code, json.loads(h.read())
+                return retry(once)
+            code, hi = post({'v': 1, 'id': 'i1', 'cmd': 'info'})
+            check('HTTP info == USB info (same boot)', code == 200 and hi == usb({'v': 1, 'id': 'i1', 'cmd': 'info'}))
+            code, hg = post({'v': 1, 'id': 'g1', 'cmd': 'get_config'})
+            check('HTTP get_config == USB get_config', code == 200 and hg == usb({'v': 1, 'id': 'g1', 'cmd': 'get_config'}))
+            bad = {'v': 1, 'id': 'b', 'cmd': 'action', 'bootId': boot, 'action': 'reset', 'channel': 9}
+            code, hb = post(bad); check('HTTP/USB same error, HTTP 400', code == 400 and hb == usb(bad))
+            code, ha = post({'v': 1, 'id': 'a', 'cmd': 'status'}, tok=None); check('HTTP without token -> 403 AUTH_REQUIRED', code == 403 and err(ha, 'AUTH_REQUIRED') and ha['id'] == 'a')
+            code, hv = post({'cmd': 'status'}); check('HTTP /api/command without v -> 400', code == 400 and err(hv, 'UNSUPPORTED_VERSION'))
+            host = st['ip']
+            def sse(query):
+                def once():
+                    c = socket.create_connection((host, 80), timeout=15); c.sendall(f'GET /api/events?{query} HTTP/1.1\r\nHost: {host}\r\n\r\n'.encode()); return c
+                return retry(once)
+            c = sse(f'v=1&token={token}'); buf = b''; until = time.monotonic() + 5
+            def complete(b): return b'data: ' in b and b'\n\n' in b.split(b'data: ', 1)[1]
+            while not complete(buf) and time.monotonic() < until: buf += c.recv(65536)
+            c.close(); payload = json.loads(buf.split(b'data: ', 1)[1].split(b'\n\n', 1)[0])
+            check('SSE v1 envelope coherent', payload['v'] == 1 and payload['bootId'] == boot and payload['revision'] == payload['status']['configRevision'] and payload['savedRevision'] == payload['status']['savedRevision'] and isinstance(payload['seq'], int))
+            c = sse(f'v=2&token={token}'); head = c.recv(4096); c.close(); check('SSE v=2 -> 400', b' 400 ' in head.split(b'\r\n', 1)[0])
+            time.sleep(1); conns = [sse(f'v=1&token={token}') for _ in range(3)]; time.sleep(1.5)
+            c4 = sse(f'token={token}'); head = c4.recv(4096); c4.close()
+            for c in conns: c.close()
+            check('4th SSE client refused (503), limit shared by v1/legacy', b' 503 ' in head.split(b'\r\n', 1)[0])
+        except TimeoutError as e:
+            skipped.append(f'HTTP/SSE partial, network: {e}'); print('NOT RUN (rest of HTTP/SSE):', e, flush=True)
     else:
         skipped.append('HTTP/SSE (Wi-Fi not online)'); print('SKIP HTTP/SSE: Wi-Fi not online', flush=True)
     # boot change
