@@ -309,7 +309,8 @@ USB поддерживает те же сессии: `cmd` = `preview`, `apply`,
 
 ## Проверки
 
-Новые проверки: [вспышки в окне Switch](docs/testing/2026-11-23-fw-v4-switch-window.md),
+Новые проверки: [таймер перегрузки и прошивка d9008bc](docs/testing/2026-11-23-fw-v4-overload-timer.md),
+[вспышки в окне Switch](docs/testing/2026-11-23-fw-v4-switch-window.md),
 [отказы Wi-Fi и вспышки](docs/testing/2026-11-22-fw-v4-transients.md),
 [предыдущие исправления по ревью](docs/testing/2026-11-22-fw-v4-review-fixes.md),
 [исходный отчёт 0.4](docs/testing/2026-11-22-fw-v4-offline.md).

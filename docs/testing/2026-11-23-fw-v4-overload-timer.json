@@ -1,0 +1,32 @@
+{
+  "date": "2026-11-23",
+  "sourceCommit": "d9008bc4d36fbef3318c32733132f07a7bb3eb95",
+  "sourceTreeCleanAtBuild": true,
+  "firmware": "0.4.0+d9008bc",
+  "environment": "l8_v3",
+  "flashed": true,
+  "bytes": 957696,
+  "sha256": "ac40dd95b46ba3f8e7b3f18eb1ade706740780a3855c6e26825c944bda11c70e",
+  "checks": {
+    "installedVersion": true,
+    "rmtHealthy": true,
+    "bootSelfCheck": true,
+    "usbOnly": true,
+    "safeOutputs": true,
+    "configurationPreserved": true,
+    "wifiOnline": true
+  },
+  "nativeTestsPreviouslyVerified": 55,
+  "nativeSettingsTestsPreviouslyVerified": 8,
+  "hardwarePower": "USB only",
+  "loadTested": false,
+  "finalMaster": false,
+  "wifi": {
+    "phase": "online",
+    "attempts": 1,
+    "lastDisconnectReason": 201,
+    "apClients": 0,
+    "droppedEvents": 0
+  },
+  "finalUptimeMs": 18536
+}
