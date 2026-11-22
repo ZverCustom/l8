@@ -1,0 +1,58 @@
+{
+  "date": "2026-11-22",
+  "sourceCommit": "c034072b67fa811046733512aa2abcbca47e4024",
+  "sourceTreeCleanAtBuild": true,
+  "baseCommit": "5572214",
+  "tests": {
+    "native": 50,
+    "native_settings": 8,
+    "pythonBuildVersion": 5,
+    "ui": "passed",
+    "linkedIdentity": "passed"
+  },
+  "builds": [
+    {
+      "environment": "l8_v3",
+      "version": "0.4.0+c034072",
+      "bytes": 957296,
+      "sha256": "fb19fad275ceaaebd29851a0ffcbd8443efcd367c8930fec8cc81bba9c1c6c9b",
+      "flashed": false
+    },
+    {
+      "environment": "l8_v3_dma",
+      "version": "0.4.0+c034072",
+      "bytes": 950208,
+      "sha256": "bc2fc370a8ebef90bb7ab6895b34f29f974f23aca20eb7c2718e84b9d18474e5",
+      "flashed": false
+    },
+    {
+      "environment": "l8_v3_dma_flash",
+      "version": "0.4.0+c034072",
+      "bytes": 950160,
+      "sha256": "fab51ad811e5f0ee35f1614e2ead563cdc2388eadff68aad4abc50e33a5b238b",
+      "flashed": false
+    }
+  ],
+  "hardwareTested": false,
+  "pending": [
+    "Early USB log: first involuntary disconnect, core retry, second failure, next explicit begin after 2 seconds",
+    "AP client arriving during boot retry; no retry after the client closes boot budget",
+    "Black-to-white and repeated flashes on real strip at demand 2x limit, longest frame and capacitor",
+    "20-30 Master cycles and startup on every overload retry",
+    "Physical output cutoff for sustained IS fault and sustained overload; disabled autoRetry"
+  ],
+  "policy": {
+    "instantaneousCurrentSpikeRemoved": true,
+    "inrushMs": 10,
+    "switchFaultMs": 50,
+    "overcurrentMs": 100,
+    "retrySeconds": [
+      1,
+      5,
+      30
+    ],
+    "wifiExplicitBootAttempts": 3,
+    "wifiRetrySettleMs": 2000,
+    "coreFirstRetryPerBoot": 1
+  }
+}
