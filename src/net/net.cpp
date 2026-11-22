@@ -22,7 +22,8 @@ static bool scanPending=false;
 static int selectedChannel=0;
 static uint8_t selectedBssid[6]={};
 static bool selected=false;
-static l8net::HttpActivity apHttp;
+static l8net::BootAttempts bootAttempts;
+static bool bootRetryPending=false;
 static std::atomic<uint32_t> droppedEvents{0};
 
 struct NetEvent { WiFiEvent_t id; uint32_t at; uint8_t reason; };
@@ -34,12 +35,11 @@ static void startAP() {
     if(WiFi.softAP(AP_SSID,AP_PASSWORD)) {
         apOn=true;
         dns.start(53,"*",WiFi.softAPIP());
-        apHttp=l8net::HttpActivity{};
         sysLog("AP started "+WiFi.softAPIP().toString());
     } else Serial.println("Failed to start Access Point!");
 }
 static void startSTA() {
-    uint32_t now=millis(); session.enter(l8net::Session::Associating,now); ++attempts; startPending=false;
+    uint32_t now=millis(); session.enter(l8net::Session::Associating,now); ++attempts; bootAttempts.started(); startPending=false; bootRetryPending=false;
     Serial.printf("Wi-Fi begin t=%lu attempt=%lu\n",now,attempts);
     wl_status_t result=WiFi.begin(sessionSsid.c_str(),sessionPass.c_str(),selected?selectedChannel:0,selected?selectedBssid:nullptr);
     Serial.printf("Wi-Fi begin result t=%lu status=%d\n",millis(),int(result));
@@ -75,6 +75,7 @@ static void consumeEvents() {
             Serial.printf(" reason=%u (%s)",event.reason,WiFi.disconnectReasonName((wifi_err_reason_t)event.reason));
         }
         Serial.println();
+        if(event.id==ARDUINO_EVENT_WIFI_AP_STACONNECTED) bootAttempts.stop();
         // Ignore delayed events from a stopped/scan session. A voluntary
         // disconnect may also be generated inside the core's first retry;
         // association keeps its original deadline instead of calling begin again.
@@ -85,7 +86,7 @@ static void consumeEvents() {
     }
 }
 static void apOnly() {
-    startPending=false; scanPending=false; selected=false;
+    startPending=false; bootRetryPending=false; bootAttempts.stop(); scanPending=false; selected=false;
     WiFi.scanDelete(); WiFi.disconnect(false,false);
     WiFi.mode(WIFI_AP); session.enter(l8net::Session::Idle,millis());
     startAP(); wasConnected=false;
@@ -102,6 +103,7 @@ void netBegin() {
     scanPending=true; session.enter(l8net::Session::Scan,millis());
 }
 void netReconnect() {
+    bootAttempts.stop(); bootRetryPending=false;
     sessionSsid=wifiSsid; sessionPass=wifiPass;
     WiFi.disconnect(false,false); wasConnected=false;
     if(!wifiSsid.length()) { apOnly(); return; }
@@ -111,6 +113,7 @@ void netReconnect() {
 void netTick() {
     if(apOn) dns.processNextRequest();
     consumeEvents(); uint32_t now=millis();
+    bootAttempts.observeClients(apOn && WiFi.softAPgetStationNum()>0);
     if(session.phase==l8net::Session::Scan) {
         if(session.expired(now)) { apOnly(); return; }
         if(scanPending) {
@@ -125,9 +128,10 @@ void netTick() {
         WiFi.scanDelete();
         sysLog(selected?F("Saved network found at boot"):F("Saved network absent at boot; AP only"));
         if(!selected) { apOnly(); return; }
-        startSTA(); startAP(); return;
+        bootAttempts.discovered(); startSTA(); startAP(); return;
     }
     if(startPending) {
+        if(bootRetryPending && !bootAttempts.retryAllowed()) { apOnly(); return; }
         if(now-session.since>7000) { apOnly(); return; }
         if(session.phase==l8net::Session::Stopping && now-session.since<2000) return;
         if(WiFi.getStatusBits()&STA_STARTED_BIT) { startSTA(); startAP(); }
@@ -136,7 +140,7 @@ void netTick() {
     if(session.phase==l8net::Session::Idle) return;
     if(WiFi.status()==WL_CONNECTED) {
         if(!wasConnected) {
-            wasConnected=true; session.enter(l8net::Session::Online,now);
+            wasConnected=true; bootAttempts.stop(); session.enter(l8net::Session::Online,now);
             sysLog("Wi-Fi connected "+WiFi.SSID()+" "+WiFi.localIP().toString());
             if(MDNS.begin("zver-l8")) MDNS.addService("http","tcp",80);
         }
@@ -149,11 +153,15 @@ void netTick() {
         MDNS.end(); apOnly(); return;
     }
     if(associated) session.enter(l8net::Session::Dhcp,now);
-    if(session.expired(now)) { sysLog(F("Wi-Fi attempt timed out; AP only")); apOnly(); }
+    if(session.expired(now)) {
+        if(bootAttempts.retryAllowed()) {
+            sysLog(F("Wi-Fi boot attempt timed out; bounded retry after disconnect"));
+            session.enter(l8net::Session::Stopping,now); WiFi.disconnect(false,false);
+            startPending=true; bootRetryPending=true;
+        } else { sysLog(F("Wi-Fi attempt timed out; AP only")); apOnly(); }
+    }
 }
 bool netApOn() { return apOn; }
-void netApHttpActivity() { if(apOn) apHttp.touch(millis()); }
-bool netApHttpActive() { return apOn && apHttp.active(millis()); }
 uint32_t netDroppedEvents() { return droppedEvents.load(std::memory_order_relaxed); }
 const char* netPhase() {
     switch(session.phase) {

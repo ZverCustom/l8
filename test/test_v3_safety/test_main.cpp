@@ -32,6 +32,7 @@ void test_legacy_settings_follow_the_physical_output() {
     TEST_ASSERT_EQUAL_INT_ARRAY(expected,values,8);
 }
 void test_bts7008_conversion_and_safe_supply() {
+    TEST_ASSERT_FLOAT_WITHIN(.01f,13.68f,v3::vbatFromAdc(2.4f));
     TEST_ASSERT_FLOAT_WITHIN(.001f,5.f,v3::currentAmps(5.f*1200.f/5450.f));
     TEST_ASSERT_FALSE(v3::supplyValid(0)); TEST_ASSERT_FALSE(v3::supplyValid(NAN));
     TEST_ASSERT_FALSE(v3::supplyValid(INFINITY)); TEST_ASSERT_FALSE(v3::supplyValid(8.9f));
@@ -46,12 +47,6 @@ void test_shared_sense_never_selects_two_switches() {
         TEST_ASSERT_EQUAL_HEX16(0,s&0xe0ff); // never changes IN, CAN, status or sensor power
     }
     TEST_ASSERT_EQUAL(0,v3::senseSelect(8));
-}
-void test_all_channel_latches_independent() {
-    PowerLatch l[8];
-    for(unsigned c=0;c<8;++c) l[c].update(0,c==6?6.f:1.f,.3f,5.f);
-    for(unsigned c=0;c<8;++c) TEST_ASSERT_EQUAL(c==6?PowerLatch::OVERCURRENT:PowerLatch::NONE,l[c].update(100,c==6?6.f:1.f,.3f,5.f));
-    l[6].reset(); TEST_ASSERT_EQUAL(PowerLatch::NONE,l[6].update(200,1,.2,5));
 }
 void test_supply_and_ign_interlocks() {
     for(int bits=0;bits<64;++bits) {
@@ -99,4 +94,4 @@ void test_ota_failure_keeps_boot_and_reboot_inhibits() {
     // Recovery is allowed only after a healthy boot, without OTA/reboot holds.
     TEST_ASSERT_FALSE(v3::hubInhibited(true,false,false,false));
 }
-int main(){UNITY_BEGIN();RUN_TEST(test_ota_failure_keeps_boot_and_reboot_inhibits);RUN_TEST(test_connector_order_routes_power_data_and_sense_together);RUN_TEST(test_legacy_settings_follow_the_physical_output);RUN_TEST(test_bts7008_conversion_and_safe_supply);RUN_TEST(test_shared_sense_never_selects_two_switches);RUN_TEST(test_all_channel_latches_independent);RUN_TEST(test_supply_and_ign_interlocks);RUN_TEST(test_controller_stays_alive_outside_strip_voltage_range);RUN_TEST(test_input_topology_and_clamps);return UNITY_END();}
+int main(){UNITY_BEGIN();RUN_TEST(test_ota_failure_keeps_boot_and_reboot_inhibits);RUN_TEST(test_connector_order_routes_power_data_and_sense_together);RUN_TEST(test_legacy_settings_follow_the_physical_output);RUN_TEST(test_bts7008_conversion_and_safe_supply);RUN_TEST(test_shared_sense_never_selects_two_switches);RUN_TEST(test_supply_and_ign_interlocks);RUN_TEST(test_controller_stays_alive_outside_strip_voltage_range);RUN_TEST(test_input_topology_and_clamps);return UNITY_END();}

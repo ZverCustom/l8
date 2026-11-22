@@ -1,13 +1,20 @@
 #pragma once
 #include <stdint.h>
 namespace l8net {
-class HttpActivity {
-    bool seen=false; uint32_t last=0;
-public:
-    void touch(uint32_t now) { seen=true; last=now; }
-    bool active(uint32_t now) { if(seen && now-last>=60000) seen=false; return seen; }
+// At most three explicit begin calls after a successful boot discovery.
+// Seeing an AP client permanently closes this boot retry budget; client departure
+// does not restart it. Manual reconnects do not use this budget.
+struct BootAttempts {
+    static constexpr uint8_t MAX_ATTEMPTS=3;
+    uint8_t attempts=0;
+    bool allowed=false;
+    void discovered() { allowed=true; attempts=0; }
+    void started() { if(allowed && attempts<MAX_ATTEMPTS) ++attempts; }
+    void stop() { allowed=false; }
+    void observeClients(bool present) { if(present) stop(); }
+    bool retryAllowed() const { return allowed && attempts>0 && attempts<MAX_ATTEMPTS; }
 };
-// One explicit session: no reconnect timer. The Arduino core can retry its
+// Each individual attempt keeps its full association/DHCP deadline. The Arduino core can retry its
 // first failed association internally once; that remains within this deadline.
 struct Session {
     enum Phase { Idle, Scan, Associating, Dhcp, Online, Stopping } phase=Idle;

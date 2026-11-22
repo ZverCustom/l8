@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 
-// AP primary; one boot discovery / explicit STA reconnect, no background scans
+// AP primary; bounded boot attempts / explicit STA reconnect, no background scans
 extern String wifiSsid;
 extern String wifiPass;
 
@@ -15,8 +15,6 @@ void netBegin();
 void netTick();
 void netReconnect();
 bool netApOn();
-void netApHttpActivity();
-bool netApHttpActive();
 uint32_t netDroppedEvents();
 const char* netPhase();
 uint32_t netAttempts();

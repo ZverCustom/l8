@@ -48,7 +48,7 @@ static void safetyTask(void*) {
     for(;;) {
         uint32_t now=millis(); Request cfg; uint16_t reset;
         portENTER_CRITICAL(&stateMux); cfg=request; reset=resetMask; resetMask=0; portEXIT_CRITICAL(&stateMux);
-        s.vbat=vbatFromAdc(analogReadMilliVolts(VBAT_SENSE_PIN)/1000.f);
+        s.vbat=v3::vbatFromAdc(analogReadMilliVolts(VBAT_SENSE_PIN)/1000.f);
         bool raw=digitalRead(IGN_PIN);
         if(raw!=rawPrevious) { rawPrevious=raw; ignChanged=now; }
         if(now-ignChanged>=20) s.ign=raw;
@@ -69,12 +69,12 @@ static void safetyTask(void*) {
         }
         bool allowed=v3::outputsAllowed(s.vbat,cfg.inhibit,initOk,s.ioLatched);
         s.ledPowerAllowed=v3::ledsAllowed(s.vbat,s.ign,cfg.allowWithoutIgn,cfg.inhibit,initOk,s.ioLatched);
-        uint8_t mask=0;
+        uint8_t mask=0; bool rising[8]={};
         for(int i=0;i<8;++i) {
             bool permitted=s.ledPowerAllowed && cfg.master && cfg.enabled[i];
             bool on=protection[i].ready(now,cfg.autoRetry,permitted) && permitted;
             s.channels[i].fault=protection[i].fault;
-            if(on && !s.channels[i].on) { enabledAt[i]=now; protection[i].off(); }
+            if(on && !s.channels[i].on) { rising[i]=true; enabledAt[i]=now; protection[i].off(); }
             s.channels[i].on=on;
             if(on) mask|=v3::channelMask(i);
             else { s.channels[i].amps=0; s.channels[i].isVolts=0; protection[i].off(); }
@@ -88,6 +88,7 @@ static void safetyTask(void*) {
         uint16_t base=mask | ((cfg.silent || !allowed) ? 0x2000 : 0) |
                       ((now/500&1) ? 0x4000 : 0) | (s.sensorOn ? 0x8000 : 0);
         bool ok=initOk && expWrite(2,base); // all DEN low between channels
+        if(ok) for(int i=0;i<8;++i) if(rising[i]) { enabledAt[i]=millis(); protection[i].enabled(enabledAt[i]); }
         s.ledAmps=0; s.latched=s.ioLatched || s.sensorFault;
         for(int i=0;i<8 && ok;++i) {
             auto& ch=s.channels[i];

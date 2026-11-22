@@ -63,7 +63,7 @@ String hubStatusJson() {
     d["network"]=netStatusString(); d["ap"]=netApOn(); d["apSsid"]=AP_SSID;
     auto wifi=d.createNestedObject("wifi"); wifi["phase"]=netPhase(); wifi["attempts"]=netAttempts();
     wifi["lastDisconnectReason"]=netLastDisconnectReason(); wifi["apClients"]=netApOn()?WiFi.softAPgetStationNum():0;
-    wifi["apHttpActive"]=netApHttpActive(); wifi["droppedEvents"]=netDroppedEvents();
+    wifi["droppedEvents"]=netDroppedEvents();
     d["ip"]=WiFi.status()==WL_CONNECTED?WiFi.localIP().toString():WiFi.softAPIP().toString();
     d["canStatus"]=canStatusString(); d["canBitrate"]=canBitrateString(); d["dataFresh"]=vehicleDataFresh();
     d["rpm"]=vehicle.rpm; d["speed"]=vehicle.speed; d["temp"]=vehicle.temp; d["throttle"]=vehicle.throttle;
@@ -107,16 +107,6 @@ static void send(int code,const String& data) { server.sendHeader("Cache-Control
 static void error(int code,const String& text) { DynamicJsonDocument d(512); d["error"]=text; String out; serializeJson(d,out); send(code,out); }
 static bool authorized() { if(server.header("X-L8-Token")==token) return true; error(403,"Session expired; reload the page"); return false; }
 static bool body(DynamicJsonDocument& d) { if(server.arg("plain").length()>24000) { error(413,"Config is too large"); return false; } if(deserializeJson(d,server.arg("plain"))) { error(400,"Invalid JSON"); return false; } return true; }
-static void noteApHttp() {
-    // Traffic arriving through the home network must not keep the fallback AP up.
-    if(netApOn() && server.client().localIP()==WiFi.softAPIP()) netApHttpActivity();
-}
-static void apiRoute(const char* path,HTTPMethod method,WebServer::THandlerFunction handler,
-                     WebServer::THandlerFunction uploadHandler=nullptr) {
-    auto handle=[handler] { noteApHttp(); handler(); };
-    if(uploadHandler) server.on(path,method,handle,[uploadHandler] { noteApHttp(); uploadHandler(); });
-    else server.on(path,method,handle);
-}
 static void upload() {
     auto& u=server.upload();
     if(u.status==UPLOAD_FILE_START) {
@@ -143,10 +133,10 @@ static void upload() {
 void setupHub() {
     char t[33]; snprintf(t,sizeof(t),"%08lx%08lx%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random()); token=t;
     const char* headers[]={"X-L8-Token"}; server.collectHeaders(headers,1);
-    server.on("/",HTTP_GET,[] { noteApHttp(); server.sendHeader("Content-Encoding","gzip"); server.sendHeader("Cache-Control","no-cache"); server.send_P(200,"text/html",(const char*)L8_UI,L8_UI_SIZE); });
-    apiRoute("/api/session",HTTP_GET,[] { send(200,"{\"token\":\""+token+"\"}"); });
-    apiRoute("/api/status",HTTP_GET,[] { send(200,hubStatusJson()); });
-    apiRoute("/api/events",HTTP_GET,[] {
+    server.on("/",HTTP_GET,[] { server.sendHeader("Content-Encoding","gzip"); server.sendHeader("Cache-Control","no-cache"); server.send_P(200,"text/html",(const char*)L8_UI,L8_UI_SIZE); });
+    server.on("/api/session",HTTP_GET,[] { send(200,"{\"token\":\""+token+"\"}"); });
+    server.on("/api/status",HTTP_GET,[] { send(200,hubStatusJson()); });
+    server.on("/api/events",HTTP_GET,[] {
         if(server.arg("token")!=token) { error(403,"Session expired"); return; }
         for(auto& s:streams) if(!s.client || !s.client.connected()) {
             s.client.stop(); s.client=server.detach(); s.client.setNoDelay(true);
@@ -155,11 +145,11 @@ void setupHub() {
         }
         error(503,"Three status viewers already connected");
     });
-    apiRoute("/api/config",HTTP_GET,[] { bool backup=server.arg("backup")=="1"; if(backup&&!authorized()) return; send(200,settingsJson(backup,true)); });
-    apiRoute("/api/config",HTTP_POST,[] { if(!authorized()) return; DynamicJsonDocument d(24576); if(!body(d)) return; String e; if(!apply(d.as<JsonVariantConst>(),e)) { error(400,e); return; } send(200,String("{\"ok\":true,\"master\":")+(drive.masterOn?"true}":"false}")); });
+    server.on("/api/config",HTTP_GET,[] { bool backup=server.arg("backup")=="1"; if(backup&&!authorized()) return; send(200,settingsJson(backup,true)); });
+    server.on("/api/config",HTTP_POST,[] { if(!authorized()) return; DynamicJsonDocument d(24576); if(!body(d)) return; String e; if(!apply(d.as<JsonVariantConst>(),e)) { error(400,e); return; } send(200,String("{\"ok\":true,\"master\":")+(drive.masterOn?"true}":"false}")); });
     for(const char* path:{"/api/preview","/api/apply","/api/save","/api/discard","/api/touch"}) {
         String route(path);
-        apiRoute(path,HTTP_POST,[route] {
+        server.on(path,HTTP_POST,[route] {
             if(!authorized()) return;
             if(updating) { error(409,"OTA in progress"); return; }
             DynamicJsonDocument d(24576); if(!body(d)) return;
@@ -173,10 +163,10 @@ void setupHub() {
             send(200,String("{\"ok\":true,\"revision\":")+settingsRevision()+",\"master\":"+(drive.masterOn?"true}":"false}"));
         });
     }
-    apiRoute("/api/action",HTTP_POST,[] { if(!authorized()) return; DynamicJsonDocument d(1024); if(!body(d)) return; String e; if(!action(d.as<JsonVariantConst>(),e)) { error(400,e); return; } send(200,"{\"ok\":true}"); });
-    apiRoute("/api/log",HTTP_GET,[] { server.send(200,"text/plain",sysLogTail(16000)); });
-    apiRoute("/api/can",HTTP_GET,[] { server.send(200,"text/plain",sniffTableString()); });
-    apiRoute("/api/ota",HTTP_POST,[] {
+    server.on("/api/action",HTTP_POST,[] { if(!authorized()) return; DynamicJsonDocument d(1024); if(!body(d)) return; String e; if(!action(d.as<JsonVariantConst>(),e)) { error(400,e); return; } send(200,"{\"ok\":true}"); });
+    server.on("/api/log",HTTP_GET,[] { server.send(200,"text/plain",sysLogTail(16000)); });
+    server.on("/api/can",HTTP_GET,[] { server.send(200,"text/plain",sniffTableString()); });
+    server.on("/api/ota",HTTP_POST,[] {
         if(!authorized()) return;
         if(uploadOk) { send(200,"{\"ok\":true,\"reboot\":true}"); rebootAt=millis()+800; }
         else { syncHubInhibit(); error(400,uploadError.length()?uploadError:"No firmware received"); }

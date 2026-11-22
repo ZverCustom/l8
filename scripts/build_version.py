@@ -1,11 +1,12 @@
 Import("env")
 from pathlib import Path
-import subprocess
+import sys
 root = Path(env.subst("$PROJECT_DIR"))
-def git(*args):
-    return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
-revision = git("describe", "--tags", "--always", "--dirty")
-version = root.joinpath("VERSION").read_text().strip() + "+" + revision
+sys.path.insert(0, str(root / "scripts"))
+from version_info import build_identity
+revision, version = build_identity(root)
+if revision == "unknown":
+    print("Git metadata unavailable; building " + version)
 # Generate a header instead of shell-escaped compiler definitions.
 out = Path(env.subst("$BUILD_DIR")) / "generated"
 out.mkdir(parents=True, exist_ok=True)
