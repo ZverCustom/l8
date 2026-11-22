@@ -6,6 +6,7 @@
 #include "power/power.h"
 #include "board/board.h"
 #include <channel_map.h>
+#include <esp_heap_caps.h>
 
 const int ledPins[NUM_STRIPS] = {v3::dataPin(0), v3::dataPin(1), v3::dataPin(2), v3::dataPin(3), v3::dataPin(4), v3::dataPin(5), v3::dataPin(6), v3::dataPin(7)};
 
@@ -27,7 +28,7 @@ struct AnimState {
     uint8_t phase = 0;
     int bright = 0;
     bool up = true;
-    uint8_t heat[MAX_LEDS];
+    uint8_t* heat = nullptr;
 };
 static AnimState anim[NUM_STRIPS];
 
@@ -174,7 +175,9 @@ void larsonScanner(int s) {
 // Fire2012 by Mark Kriegsman
 void fire(int s) {
     int n = numLedsPerStrip[s];
+    if (!anim[s].heat) anim[s].heat = static_cast<uint8_t*>(heap_caps_calloc(MAX_LEDS, 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     uint8_t* heat = anim[s].heat;
+    if (!heat) { fill_solid(leds[s], n, CRGB::Black); return; }
     const uint8_t cooling = 55;
     const uint8_t sparking = 120;
     for (int i = 0; i < n; i++) {
@@ -308,12 +311,9 @@ void rpmLevel(int s) {
     }
 }
 
-static bool engineOn() {
-    return vehicleDataFresh() && vehicle.rpm > 300;
-}
-
 static void renderStrip(int i) {
     const StripSettings& st = stripSettings[i];
+    if (st.animationIndex != 10 && anim[i].heat) { free(anim[i].heat); anim[i].heat = nullptr; }
     bool useScale = (st.mode == 1) || (st.mode == 2 && scaleFraction(st.scaleSource) > 0.05f);
     if (useScale) {
         rpmLevel(i);
@@ -404,7 +404,7 @@ void runAnimations() {
     int brightness = can_setting.brightess;
     // no data into unpowered strips (latched or master off)
     bool blackout = !drive.masterOn || !frameShown || !powerSnapshot().on;
-    if (!blackout && !engineOn()) {
+    if (!blackout && !engineRunning()) {
         if (drive.engineOff == 2) blackout = true;
         else if (drive.engineOff == 1) brightness = brightness * constrain(drive.engineOffDim, 0, 100) / 100;
     }

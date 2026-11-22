@@ -238,3 +238,5 @@ String sniffTableString() {
     }
     return out;
 }
+
+bool engineRunning() { return vehicleDataFresh() && vehicle.rpm > 300; }

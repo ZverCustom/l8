@@ -3,11 +3,13 @@
 
 #include <Arduino.h>
 
-// Boot info and a small persistent log on LittleFS
+// Concurrent RAM journal with batched LittleFS persistence
 void sysBegin();                 // call after LittleFS is mounted
-void sysLog(const String& msg);  // Serial + /log.txt with uptime prefix
+void sysLog(const String& msg);  // Serial + RAM; no flash writes
 String sysLogTail(int maxBytes = 2500);
 void sysClearLog();
+void sysTick();
+void sysFlush();
 String sysResetReason();
 String sysUptime();
 String sysBuildInfo();

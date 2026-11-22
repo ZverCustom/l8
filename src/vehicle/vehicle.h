@@ -32,6 +32,7 @@ void vehicleSetup(CANBus& can, OBD2& obd);
 void vehicleSetMode(int mode);
 void vehicleTick();
 bool vehicleDataFresh();
+bool engineRunning();
 String canStatusString();
 String sniffTableString();
 

@@ -154,10 +154,10 @@ static void serialTick() {
 void updateHub() {
     server.handleClient(); serialTick(); uint32_t now=millis();
     if(reconnectAt && int32_t(now-reconnectAt)>=0) { reconnectAt=0; netReconnect(); }
-    if(rebootAt && int32_t(now-rebootAt)>=0) ESP.restart();
+    if(rebootAt && int32_t(now-rebootAt)>=0) { sysFlush(); ESP.restart(); }
     if(!bootConfirmed && now>=5000) {
         bool healthy=powerSnapshot().ioOk && imu.ok && psramFound() && settingsHealthy();
         if(healthy) { esp_ota_mark_app_valid_cancel_rollback(); bootConfirmed=true; syncHubInhibit(); Serial.println("L8 boot self-check passed; OTA image confirmed"); }
-        else if(now>=15000) { esp_ota_img_states_t st; const auto* p=esp_ota_get_running_partition(); if(esp_ota_get_state_partition(p,&st)==ESP_OK && st==ESP_OTA_IMG_PENDING_VERIFY) esp_ota_mark_app_invalid_rollback_and_reboot(); }
+        else if(now>=15000) { esp_ota_img_states_t st; const auto* p=esp_ota_get_running_partition(); if(esp_ota_get_state_partition(p,&st)==ESP_OK && st==ESP_OTA_IMG_PENDING_VERIFY) { sysFlush(); esp_ota_mark_app_invalid_rollback_and_reboot(); } }
     }
 }

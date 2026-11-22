@@ -1,6 +1,8 @@
 #include "system.h"
 #include <LittleFS.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
+#include <ram_log.h>
 #include "led_control/led_control.h"
 
 static const char* LOG_PATH = "/log.txt";
@@ -48,45 +50,91 @@ static void rotateIfNeeded() {
     LittleFS.rename(LOG_PATH, LOG_OLD);
 }
 
+static SemaphoreHandle_t logMutex=nullptr;
+static RamLog* journal=nullptr;
+static uint32_t lastFlush=0;
+static uint64_t reportedLost=0;
+
 void sysLog(const String& msg) {
-    Serial.println(msg);
-    ledsPause();
-    rotateIfNeeded();
-    File f = LittleFS.open(LOG_PATH, "a");
-    if (f) {
-        f.print(sysUptime());
-        f.print(' ');
-        f.println(msg);
-        f.close();
+    String line=sysUptime()+" "+msg+"\n";
+    if(journal) {
+        xSemaphoreTake(logMutex,portMAX_DELAY);
+        journal->append(line.c_str(),line.length());
+        xSemaphoreGive(logMutex);
     }
-    ledsResume();
+    Serial.println(msg);
 }
 
 void sysBegin() {
-    sysLog("--- boot, reset: " + sysResetReason() + ", build " + sysBuildInfo());
+    // Initialize before starting producer tasks. No String allocation under a
+    // spinlock, and never hold the journal mutex while waiting for LED/flash.
+    logMutex=xSemaphoreCreateMutex();
+    char* storage=static_cast<char*>(heap_caps_malloc(16384,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+    if(storage && logMutex) journal=new RamLog(storage,16384);
+    else { free(storage); Serial.println("RAM journal unavailable"); }
+    sysLog("--- boot, reset: "+sysResetReason()+", build "+sysBuildInfo());
+}
+
+// Called by the main loop only (including reboot/OTA handlers).
+void sysFlush() {
+    if(!journal) return;
+    char* batch=static_cast<char*>(heap_caps_malloc(16384,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+    if(!batch) return;
+    xSemaphoreTake(logMutex,portMAX_DELAY);
+    uint64_t from=journal->flushed, lost=journal->lost;
+    size_t size=journal->copy(from,batch,16384);
+    xSemaphoreGive(logMutex);
+    if(!size) { free(batch); return; }
+    ledsPause();
+    rotateIfNeeded();
+    File f=LittleFS.open(LOG_PATH,"a");
+    bool ok=bool(f);
+    if(ok && lost!=reportedLost) f.printf("[RAM log overflow: %llu bytes lost]\n",lost);
+    if(ok) { ok=f.write(reinterpret_cast<uint8_t*>(batch),size)==size; f.flush(); f.close(); }
+    ledsResume();
+    if(ok) {
+        xSemaphoreTake(logMutex,portMAX_DELAY);
+        journal->acknowledge(from+size);
+        xSemaphoreGive(logMutex);
+        reportedLost=lost;
+    }
+    free(batch);
+}
+void sysTick() {
+    if(millis()-lastFlush<10000) return;
+    lastFlush=millis(); sysFlush();
 }
 
 String sysLogTail(int maxBytes) {
-    if (!LittleFS.exists(LOG_PATH)) return F("(no log)");
-    File f = LittleFS.open(LOG_PATH, "r");
-    if (!f) return F("(no log)");
-    size_t size = f.size();
-    if ((int)size > maxBytes) f.seek(size - maxBytes);
-    String s;
-    s.reserve(maxBytes + 1);
-    while (f.available()) s += (char)f.read();
-    f.close();
-    if ((int)size > maxBytes) {
-        int nl = s.indexOf('\n');
-        if (nl >= 0) s = s.substring(nl + 1);
+    maxBytes=constrain(maxBytes,1,16384);
+    String tail;
+    // Pending RAM records are visible immediately without forcing a flash write.
+    if(journal) {
+        char* copy=static_cast<char*>(malloc(maxBytes+1));
+        if(copy) {
+            xSemaphoreTake(logMutex,portMAX_DELAY);
+            uint64_t from=journal->flushed;
+            if(journal->end-from>uint64_t(maxBytes)) from=journal->end-maxBytes;
+            size_t n=journal->copy(from,copy,maxBytes); copy[n]=0;
+            xSemaphoreGive(logMutex);
+            tail=copy; free(copy);
+        }
     }
-    return s;
+    int remaining=maxBytes-tail.length();
+    if(remaining>0) {
+        File f=LittleFS.open(LOG_PATH,"r");
+        if(f) {
+            size_t size=f.size(); if(size>size_t(remaining)) f.seek(size-remaining);
+            String disk; disk.reserve(remaining+1);
+            while(f.available()) disk+=char(f.read());
+            f.close(); tail=disk+tail;
+        }
+    }
+    return tail.length()?tail:String("(no log)");
 }
 
 void sysClearLog() {
-    ledsPause();
-    LittleFS.remove(LOG_PATH);
-    LittleFS.remove(LOG_OLD);
-    ledsResume();
-    sysLog(F("log cleared"));
+    if(journal) { xSemaphoreTake(logMutex,portMAX_DELAY); journal->clear(); xSemaphoreGive(logMutex); }
+    ledsPause(); LittleFS.remove(LOG_PATH); LittleFS.remove(LOG_OLD); ledsResume();
+    reportedLost=0; sysLog(F("log cleared"));
 }

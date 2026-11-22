@@ -49,6 +49,7 @@ void loop() {
     powerTick();
     netTick();
     settingsTick();
+    sysTick();
     updateHub();
     vehicleTick();
     powerTick();

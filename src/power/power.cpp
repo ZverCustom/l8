@@ -26,7 +26,7 @@ const char* powerFaultName(uint8_t v) { return v==1 ? "overcurrent" : v==2 ? "sw
 void powerTick() {
     Request next;
     next.master=drive.masterOn;
-    bool parked=savedData.cutPowerEngineOff && drive.engineOff==2 && !(vehicleDataFresh() && vehicle.rpm>300);
+    bool parked=savedData.cutPowerEngineOff && drive.engineOff==2 && !engineRunning();
     if(parked) next.master=false;
     next.allowWithoutIgn=savedData.allowWithoutIgn; next.sensor=savedData.sensor5v;
     for(int i=0;i<8;++i) { next.enabled[i]=stripSettings[i].enabled; next.maxAmps[i]=savedData.channelMaxAmps[i]; next.calibration[i]=savedData.channelCal[i]; }
