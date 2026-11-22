@@ -71,6 +71,8 @@ bool settingsTouchPreview(JsonVariantConst request, String& error);
 bool settingsDiscardPreview(JsonVariantConst request, String& error);
 bool settingsPreviewActive();
 uint32_t settingsRevision();
+// Revision whose content is confirmed in flash; false (JSON null) when none is.
+bool settingsSavedRevision(uint32_t& value);
 void settingsTick();
 void settingsPresetSave(int i);
 bool settingsPresetLoad(int i);

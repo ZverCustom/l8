@@ -55,7 +55,7 @@ static void syncHubInhibit() {
     powerInhibit(!ledsHealthy() || v3::hubInhibited(bootConfirmed,updating,uploadOk,rebootAt!=0));
 }
 // Single source for GET /api/info and USB {"cmd":"info"}. Capabilities list only
-// what this build implements; commands.v1/savedRevision/preview.v1 come with P1-B/C.
+// what this build implements; commands.v1/preview.v1/status.sse come with P1-C.
 String hubInfoJson() {
     DynamicJsonDocument d(1536);
     d["product"]="ZVER L8"; d["hardware"]=3; d["deviceId"]=deviceId; d["bootId"]=bootId;
@@ -63,16 +63,17 @@ String hubInfoJson() {
     auto protocol=d.createNestedObject("protocol"); protocol["major"]=1; protocol["minor"]=0;
     d["configSchema"]=L8_CONFIG_SCHEMA;
     auto transports=d.createNestedArray("transports"); transports.add("http"); transports.add("usb");
-    auto caps=d.createNestedArray("capabilities"); caps.add("info.v1"); caps.add("channel.reason"); caps.add("ota.http");
+    auto caps=d.createNestedArray("capabilities"); caps.add("info.v1"); caps.add("channel.reason"); caps.add("config.savedRevision"); caps.add("ota.http");
     auto l=d.createNestedObject("limits");
     l["channels"]=8; l["maxCommandBytes"]=L8_MAX_CONFIG_BYTES; l["maxConfigBytes"]=L8_MAX_CONFIG_BYTES;
     l["maxLedCount"]=MAX_LEDS; l["maxChannelAmps"]=L8_MAX_CHANNEL_AMPS; l["previewLeaseMs"]=L8_PREVIEW_LEASE_MS;
     l["previewIntervalMs"]=100; l["statusIntervalMs"]=500; l["maxSseClients"]=sizeof(streams)/sizeof(streams[0]);
     String out; serializeJson(d,out); return out;
 }
+static void addSaved(JsonDocument& d) { uint32_t saved; if(settingsSavedRevision(saved)) d["savedRevision"]=saved; else d["savedRevision"]=nullptr; }
 String hubStatusJson() {
     auto p=powerSnapshot(); DynamicJsonDocument d(8192);
-    d["configRevision"]=settingsRevision(); d["previewActive"]=settingsPreviewActive(); d["build"]=GIT_REV; d["ledBackend"]=ledsBackend(); d["ledHealthy"]=ledsHealthy(); d["product"]="ZVER L8"; d["hardware"]=3; d["firmware"]=L8_FW_VERSION; d["uptimeMs"]=millis();
+    d["configRevision"]=settingsRevision(); addSaved(d); d["bootId"]=bootId; d["previewActive"]=settingsPreviewActive(); d["build"]=GIT_REV; d["ledBackend"]=ledsBackend(); d["ledHealthy"]=ledsHealthy(); d["product"]="ZVER L8"; d["hardware"]=3; d["firmware"]=L8_FW_VERSION; d["uptimeMs"]=millis();
     d["master"]=drive.masterOn; d["vbat"]=p.vbat; d["ign"]=p.ign; d["hold"]=p.hold;
     d["allowWithoutIgn"]=savedData.allowWithoutIgn; d["ledPowerAllowed"]=p.ledPowerAllowed;
     d["ioOk"]=p.ioOk; d["ioFault"]=p.ioLatched; d["powerStatus"]=powerStatusString();
@@ -183,7 +184,8 @@ void setupHub() {
             else ok=settingsPreview(d.as<JsonVariantConst>(),route=="/api/apply",e);
             if(!ok) { error(e.startsWith("Configuration changed")?409:e.startsWith("Flash write")?507:400,e); return; }
             if(mode!=canMode) vehicleSetMode(canMode); else if(rate!=canBitrateSel) vehicleSetBitrate(canBitrateSel);
-            send(200,String("{\"ok\":true,\"revision\":")+settingsRevision()+",\"master\":"+(drive.masterOn?"true}":"false}"));
+            DynamicJsonDocument r(256); r["ok"]=true; r["revision"]=settingsRevision(); addSaved(r); r["master"]=drive.masterOn;
+            String out; serializeJson(r,out); send(200,out);
         });
     }
     server.on("/api/action",HTTP_POST,[] { if(!authorized()) return; DynamicJsonDocument d(1024); if(!body(d)) return; String e; if(!action(d.as<JsonVariantConst>(),e)) { error(400,e); return; } send(200,"{\"ok\":true}"); });
@@ -224,7 +226,7 @@ static void serialTick() {
                 else if(!strcmp(cmd,"discard")) ok=settingsDiscardPreview(d.as<JsonVariantConst>(),e);
                 else if(!strcmp(cmd,"touch")) ok=settingsTouchPreview(d.as<JsonVariantConst>(),e);
                 if(ok && strcmp(cmd,"set_config")) { if(mode!=canMode) vehicleSetMode(canMode); else if(rate!=canBitrateSel) vehicleSetBitrate(canBitrateSel); }
-                DynamicJsonDocument result(512); result["revision"]=settingsRevision(); result["master"]=drive.masterOn; result["ok"]=ok; if(!ok) result["error"]=e.length()?e:"Unknown command"; serializeJson(result,out);
+                DynamicJsonDocument result(512); result["revision"]=settingsRevision(); addSaved(result); result["master"]=drive.masterOn; result["ok"]=ok; if(!ok) result["error"]=e.length()?e:"Unknown command"; serializeJson(result,out);
             }
         }
         serialLine=""; Serial.println("L8 "+out);

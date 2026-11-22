@@ -11,8 +11,15 @@ static uint32_t requested=0;
 static String pendingJson;
 static SavedData previewBase;
 static String previewOwner;
-static uint32_t revision=0, previewTouched=0;
+static uint32_t revision=0, previewTouched=0, previewBaseRevision=0;
 static bool previewActive=false;
+// savedRevision bookkeeping. "Content" is the canonical serialization of the RAM
+// config (secrets included, runtime Master excluded); identity is a 64-bit hash.
+// confirmed*: content known to be installed in flash (main file, or the backup
+// when mainValid is false). pending*: the snapshot waiting for its write.
+static bool savedValid=false, mainValid=false;
+static uint64_t confirmedHash=0, pendingHash=0;
+static uint32_t confirmedRevision=0, pendingRevision=0;
 static constexpr const char* PATH="/config-v3.json";
 static void defaults() {
     memset(&savedData,0,sizeof(savedData));
@@ -51,8 +58,8 @@ static void encodeStrip(JsonObject o,const StripSettings& s,int count) {
     o["source"]=s.scaleSource; o["middle"]=s.bottom; o["center"]=s.center;
 }
 static void encodeCan(JsonObject o,const CanSettings& c) { o["minRpm"]=c.minRPM; o["maxRpm"]=c.maxRPM; o["speed"]=c.speed; o["brightness"]=c.brightess; }
-String settingsJson(bool secrets,bool baseline) {
-    pullLive(); const SavedData& data=((secrets || baseline) && previewActive)?previewBase:savedData; DynamicJsonDocument doc(24576); doc["schema"]=L8_CONFIG_SCHEMA;
+static String encode(const SavedData& data,bool secrets) {
+    DynamicJsonDocument doc(24576); doc["schema"]=L8_CONFIG_SCHEMA;
     auto g=doc.createNestedObject("global"); encodeCan(g,data.can_setting);
     g["autoRetry"]=data.autoRetry; g["autoStart"]=data.autoStart; g["allowWithoutIgn"]=data.allowWithoutIgn; g["sensor5v"]=data.sensor5v;
     g["shiftRpm"]=data.drive.shiftRPM; g["shiftColor"]=data.drive.shiftColor; g["engineOff"]=data.drive.engineOff;
@@ -71,6 +78,25 @@ String settingsJson(bool secrets,bool baseline) {
     for(auto& p:data.presets) { auto o=presets.createNestedObject(); o["used"]=p.used; o["name"]=p.name; if(!p.used) continue; encodeCan(o.createNestedObject("global"),p.can); auto a=o.createNestedArray("strips"); for(int i=0;i<8;++i) encodeStrip(a.createNestedObject(),p.strips[i],p.numLeds[i]); }
     String out; serializeJson(doc,out); return out;
 }
+String settingsJson(bool secrets,bool baseline) {
+    pullLive(); return encode(((secrets || baseline) && previewActive)?previewBase:savedData,secrets);
+}
+static uint64_t contentHash(const String& text) {
+    uint64_t h=1469598103934665603ull;
+    for(const char* c=text.c_str();*c;++c) { h^=uint8_t(*c); h*=1099511628211ull; }
+    return h;
+}
+static uint64_t currentHash() { pullLive(); return contentHash(encode(savedData,true)); }
+// Every new revision token outside a preview is matched against the pending and
+// confirmed snapshots by content, so a return to saved content needs no write.
+static void bumpRevision() {
+    ++revision;
+    if(previewActive) return;
+    uint64_t h=currentHash();
+    if(pending && h==pendingHash) pendingRevision=revision;
+    if(savedValid && h==confirmedHash) confirmedRevision=revision;
+}
+bool settingsSavedRevision(uint32_t& value) { value=confirmedRevision; return savedValid; }
 static bool number(JsonVariantConst v,float lo,float hi) { return v.is<float>() && isfinite(v.as<float>()) && v.as<float>()>=lo && v.as<float>()<=hi; }
 static bool integer(JsonVariantConst v,int lo,int hi) { return v.is<int>() && v.as<int>()>=lo && v.as<int>()<=hi; }
 static bool decodeCan(JsonObjectConst o,CanSettings& c) {
@@ -128,29 +154,38 @@ bool settingsApply(JsonVariantConst value,String& error) {
     for(int i=0;i<8;++i) resize |= next.numLeds[i]!=numLedsPerStrip[i];
     ledsPause();
     next.drive.masterOn=drive.masterOn;
-    savedData=next; pushLive(); if(resize) requestLedReinit(); powerTick(); ledsResume(); ++revision;
+    savedData=next; pushLive(); if(resize) requestLedReinit(); powerTick(); ledsResume(); bumpRevision();
     return true;
 }
 static bool readConfig(const char* path) {
     File file=LittleFS.open(path,"r"); if(!file||file.size()>L8_MAX_CONFIG_BYTES) return false;
     DynamicJsonDocument doc(24576); auto result=deserializeJson(doc,file); file.close();
     String error; bool ok=!result && settingsApply(doc.as<JsonVariantConst>(),error);
-    if(ok && doc["schema"].as<int>()<5) settingsSave(); // write schema 5 atomically after startup
-    return ok;
+    if(!ok) return false;
+    if(doc["schema"].as<int>()<5) settingsSave(); // write schema 5 atomically after startup; not yet confirmed
+    else { savedValid=true; confirmedHash=currentHash(); confirmedRevision=revision; }
+    return true;
 }
 void settingsBegin() {
     pending=false; pendingJson=""; previewActive=false; previewOwner=""; revision=0;
+    savedValid=false; mainValid=false; confirmedHash=pendingHash=0; confirmedRevision=pendingRevision=0;
     defaults(); pushLive();
     healthy=LittleFS.begin(true); // fresh board / v2 FS: config-v3 uses a separate file
     if(!healthy) { Serial.println("FS unavailable: defaults; outputs disarmed"); return; }
     bool exists=LittleFS.exists(PATH);
-    if(exists && !readConfig(PATH)) { Serial.println("Config invalid; trying backup"); if(!readConfig("/config-v3.bak")) { defaults(); pushLive(); } }
-    else if(!exists && LittleFS.exists("/config-v3.bak")) readConfig("/config-v3.bak");
+    if(exists && readConfig(PATH)) mainValid=true;
+    else if(exists) { Serial.println("Config invalid; trying backup"); if(!readConfig("/config-v3.bak")) { defaults(); pushLive(); savedValid=false; pending=false; pendingJson=""; } }
+    else if(LittleFS.exists("/config-v3.bak") && !readConfig("/config-v3.bak")) { defaults(); pushLive(); savedValid=false; pending=false; pendingJson=""; }
     drive.masterOn=savedData.autoStart;
     Serial.println("L8 v3 settings ready");
 }
 bool settingsHealthy() { return healthy; }
-void settingsSave() { ++revision; pendingJson=settingsJson(true); pending=true; requested=millis(); }
+void settingsSave() {
+    // During a preview the snapshot is the baseline, which owns the pre-preview token.
+    bumpRevision(); pendingJson=settingsJson(true); pendingHash=contentHash(pendingJson);
+    pendingRevision=previewActive?previewBaseRevision:revision; pending=true; requested=millis();
+    if(savedValid && pendingHash==confirmedHash) { pending=false; pendingJson=""; confirmedRevision=pendingRevision; } // already in flash
+}
 bool settingsSaveNow() {
     if(!healthy) return false;
     if(!pending) return true;
@@ -159,18 +194,32 @@ bool settingsSaveNow() {
     File f=LittleFS.open("/config-v3.tmp","w");
     bool ok=f && f.print(data)==data.length(); if(f) { f.flush(); f.close(); }
     if(ok) {
-        LittleFS.remove("/config-v3.bak");
-        if(LittleFS.exists(PATH)) ok=LittleFS.rename(PATH,"/config-v3.bak");
+        // Keep one installed copy of the confirmed content at every step: rotate the
+        // main file into the backup only while it is the valid copy; otherwise the
+        // backup is that copy and must survive (a stale/corrupt main file is dropped).
+        if(mainValid) {
+            LittleFS.remove("/config-v3.bak");
+            ok=!LittleFS.exists(PATH) || LittleFS.rename(PATH,"/config-v3.bak");
+            if(ok) mainValid=false;
+        } else if(LittleFS.exists(PATH)) ok=LittleFS.remove(PATH);
         if(ok) ok=LittleFS.rename("/config-v3.tmp",PATH);
     }
-    ledsFlashResume(); pending=!ok; if(ok) pendingJson=""; else Serial.println("Config save failed (previous config retained)");
+    ledsFlashResume();
+    if(ok) {
+        mainValid=true; savedValid=true; confirmedHash=pendingHash; confirmedRevision=pendingRevision;
+        if(!previewActive && currentHash()==confirmedHash) confirmedRevision=revision;
+        pending=false; pendingJson="";
+    } else {
+        if(!LittleFS.exists(PATH) && !LittleFS.exists("/config-v3.bak")) savedValid=false; // nothing installed survives
+        Serial.println("Config save failed (previous config retained)");
+    }
     return ok;
 }
 static void restorePreview() {
     if(!previewActive) return;
     ledsPause(); previewBase.drive.masterOn=drive.masterOn;
     savedData=previewBase; pushLive(); requestLedReinit(); powerTick(); ledsResume();
-    previewActive=false; previewOwner=""; ++revision;
+    previewActive=false; previewOwner=""; bumpRevision();
 }
 void settingsTick() {
     if(previewActive && millis()-previewTouched>=L8_PREVIEW_LEASE_MS) {
@@ -202,19 +251,25 @@ bool settingsPreview(JsonVariantConst req,bool full,String& error) {
             dest[key]=item.value();
         }
     }
-    pullLive(); SavedData before=savedData;
-    if(!settingsApply(candidate.as<JsonVariantConst>(),error)) return false;
-    if(!previewActive) { previewBase=before; previewOwner=req["client"].as<const char*>(); previewActive=true; }
+    pullLive(); SavedData before=savedData; uint32_t beforeRevision=revision; bool starting=!previewActive;
+    if(starting) previewActive=true; // the new token belongs to the preview, not to saved content
+    if(!settingsApply(candidate.as<JsonVariantConst>(),error)) { if(starting) previewActive=false; return false; }
+    if(starting) { previewBase=before; previewBaseRevision=beforeRevision; previewOwner=req["client"].as<const char*>(); }
     previewTouched=millis(); return true;
 }
 bool settingsCommitPreview(JsonVariantConst req,String& error) {
     if(!checkEditor(req,error,true)) return false;
     // Commit only this checked revision. A previously scheduled write owns its
     // serialized snapshot, so it cannot accidentally persist later previews.
-    bool oldPending=pending; String oldJson=pendingJson; uint32_t oldRequested=requested;
+    bool oldPending=pending; String oldJson=pendingJson; uint32_t oldRequested=requested, oldRevision=revision, oldConfirmed=confirmedRevision;
+    uint64_t oldHash=pendingHash; uint32_t oldPendingRevision=pendingRevision;
     previewActive=false; settingsSave();
-    if(!settingsSaveNow()) { previewActive=true; pending=oldPending; pendingJson=oldJson; requested=oldRequested; --revision; error="Flash write failed; preview remains unsaved"; return false; }
-    previewOwner=""; ++revision; return true;
+    if(!settingsSaveNow()) {
+        // The failed preview never replaces the earlier pending snapshot or its token.
+        previewActive=true; pending=oldPending; pendingJson=oldJson; requested=oldRequested; pendingHash=oldHash; pendingRevision=oldPendingRevision;
+        revision=oldRevision; confirmedRevision=oldConfirmed; error="Flash write failed; preview remains unsaved"; return false;
+    }
+    previewOwner=""; return true;
 }
 bool settingsTouchPreview(JsonVariantConst req,String& error) {
     if(!checkEditor(req,error,true)) return false; previewTouched=millis(); return true;
