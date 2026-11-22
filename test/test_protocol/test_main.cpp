@@ -4,6 +4,8 @@
 #include <string>
 #include "../../src/settings/settings.cpp"
 #include "../../src/protocol/protocol.cpp"
+#include <line_framer.h>
+#include <vector>
 SerialStub Serial; uint32_t testMillis=0; FakeFS LittleFS;
 CanSettings can_setting; StripSettings stripSettings[NUM_STRIPS]; int numLedsPerStrip[NUM_STRIPS];
 int canMode=2,canBitrateSel=1; String wifiSsid,wifiPass;
@@ -139,7 +141,6 @@ void envelope_validation(){
         "{\"v\":1,\"id\":\"a\",\"cmd\":\"preview\",\"bootId\":\"$B\",\"client\":\"x\",\"revision\":$R,\"strip\":0,\"patch\":{\"color\":255.0}}",
         "{\"v\":1,\"id\":\"a\",\"cmd\":\"preview\",\"bootId\":\"$B\",\"client\":\"x\",\"revision\":$R,\"strip\":0,\"patch\":{\"count\":10}}",
         "{\"v\":1,\"id\":\"a\",\"cmd\":\"preview\",\"bootId\":\"$B\",\"client\":\"x\",\"revision\":$R,\"strip\":0,\"patch\":{\"color\":1},\"x\":0}",
-        "{\"v\":1,\"id\":\"a\",\"cmd\":\"preview\",\"bootId\":\"$B\",\"client\":\"a\\u0000b\",\"revision\":$R,\"strip\":0,\"patch\":{\"color\":1}}",
         "{\"v\":1,\"id\":\"a\",\"cmd\":\"preview\",\"bootId\":\"$B\",\"client\":\"a\\tb\",\"revision\":$R,\"strip\":0,\"patch\":{\"color\":1}}",
         "{\"v\":1,\"id\":\"a\",\"cmd\":\"preview\",\"bootId\":\"$B\",\"client\":\"\",\"revision\":$R,\"strip\":0,\"patch\":{\"color\":1}}",
         "{\"v\":1,\"id\":\"a\",\"cmd\":\"save\",\"bootId\":\"$B\",\"client\":\"x\"}",
@@ -261,4 +262,81 @@ void legacy_payloads_unchanged(){
     std::string huge(24001,' ');out=legacyHttp("/api/config",huge.data(),huge.size(),code);TEST_ASSERT_EQUAL(413,code);
     r=usb("not json");expectError(r,"BAD_JSON");
 }
-int main(){UNITY_BEGIN();RUN_TEST(envelope_shape_and_reads);RUN_TEST(http_and_usb_give_identical_result_and_effect);RUN_TEST(each_command_success_and_failure);RUN_TEST(envelope_validation);RUN_TEST(boot_revision_and_editor_conflicts);RUN_TEST(ota_blocks_every_mutation_on_every_path);RUN_TEST(size_limits);RUN_TEST(flash_failure_keeps_preview_and_lease);RUN_TEST(sse_v1_and_auth);RUN_TEST(legacy_payloads_unchanged);return UNITY_END();}
+
+// R2: U+0000 must not shorten names/keys or merge keys; duplicates are refused too
+static int hookCalls(){return masterPushes+resets+reboots+reconnects+calibrations;}
+void nul_and_duplicate_keys_refused_without_effect(){
+    std::string cases[]={
+        "{\"v\":1,\"id\":\"x\",\"cmd\":\"action\\u0000junk\",\"bootId\":\"$B\",\"action\":\"master\",\"on\":true}",
+        "{\"v\":1,\"id\":\"x\",\"cmd\":\"action\",\"bootId\":\"$B\",\"action\":\"master\\u0000junk\",\"on\":true}",
+        "{\"v\":1,\"id\":\"x\",\"cmd\":\"action\",\"bootId\":\"$B\\u0000junk\",\"action\":\"master\",\"on\":true}",
+        "{\"v\":1,\"id\":\"x\",\"cmd\":\"action\",\"bootId\":\"$B\",\"action\":\"master\",\"on\":true,\"on\\u0000junk\":false}",
+        "{\"v\":1,\"id\":\"x\",\"cmd\":\"preview\",\"bootId\":\"$B\",\"client\":\"app\",\"revision\":$R,\"strip\":0,\"patch\":{\"color\\u0000junk\":321}}",
+        "{\"v\":1,\"id\":\"x\",\"cmd\":\"action\",\"bootId\":\"$B\",\"action\":\"master\",\"on\":false,\"on\":true}",
+        "{\"v\":1,\"id\":\"x\",\"cmd\":\"preview\",\"bootId\":\"$B\",\"client\":\"app\",\"revision\":$R,\"strip\":0,\"patch\":{\"color\":1,\"\\u0063olor\":2}}",
+        "{\"v\":1,\"id\":\"x\",\"cmd\":\"get_config\",\"view\":\"effective\\u0000\",\"client\":\"app\"}"};
+    for(auto& raw:cases){
+        std::string m=fill(raw),before=state();
+        auto u=usb(m);std::string ut=text(u);expectError(u,"INVALID_ARGUMENT");TEST_ASSERT_TRUE_MESSAGE(u["id"].isNull(),m.c_str());
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(before.c_str(),state().c_str(),m.c_str());
+        auto h=http(m);TEST_ASSERT_EQUAL_STRING_MESSAGE(ut.c_str(),text(h).c_str(),m.c_str());TEST_ASSERT_EQUAL(400,lastHttp);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(before.c_str(),state().c_str(),m.c_str());TEST_ASSERT_FALSE(drive.masterOn);
+    }
+    TEST_ASSERT_EQUAL(0,hookCalls());
+    // legacy paths use the same rule
+    std::string before=state();
+    std::string lp=fill("{\"client\":\"web\",\"revision\":$R,\"strip\":0,\"patch\":{\"color\\u0000junk\":321}}");int code;
+    String out=legacyHttp("/api/preview",lp.data(),lp.size(),code);TEST_ASSERT_EQUAL(400,code);TEST_ASSERT_EQUAL_STRING("{\"error\":\"Invalid JSON\"}",out.c_str());
+    std::string la="{\"action\":\"master\",\"on\":true,\"on\":false}";out=legacyHttp("/api/action",la.data(),la.size(),code);TEST_ASSERT_EQUAL(400,code);
+    auto r=usb("{\"cmd\":\"action\",\"action\":\"master\\u0000x\",\"on\":true}");expectError(r,"INVALID_ARGUMENT");
+    TEST_ASSERT_EQUAL_STRING(before.c_str(),state().c_str());TEST_ASSERT_EQUAL(0,hookCalls());
+    // a literal backslash-u0000 (no NUL) is an ordinary string
+    expectOk(usb("{\"v\":1,\"id\":\"a\\\\u0000\",\"cmd\":\"info\"}"));TEST_ASSERT_EQUAL_STRING("a\\u0000",reply["id"]);
+}
+// R3: USB keeps body bytes; a CR inside the body is the client's message, not noise
+static std::vector<std::string> usbStream(const std::string& bytes){
+    LineFramer f(MAX_COMMAND_BYTES);std::vector<std::string> out;
+    for(char c:bytes){auto e=f.feed(c);if(e==LineFramer::Overflow)out.push_back(usbOverflow().c_str());if(e==LineFramer::Line){const std::string& l=f.text();out.push_back(handleUsbLine(l.data(),l.size()).c_str());}}
+    return out;
+}
+void usb_cr_inside_body_is_not_removed(){
+    std::string raw=fill("{\"v\":1,\"id\":\"x\",\"cmd\":\"action\",\"bootId\":\"$B\",\"action\":\"master\",\"on\":true}");
+    std::string withCr=raw;withCr.insert(withCr.find("action")+3,1,'\r');
+    auto out=usbStream(withCr+"\n");TEST_ASSERT_EQUAL(1,out.size());TEST_ASSERT_NOT_NULL(strstr(out[0].c_str(),"BAD_JSON"));TEST_ASSERT_FALSE(drive.masterOn);
+    auto h=http(withCr);expectError(h,"BAD_JSON");TEST_ASSERT_EQUAL_STRING(out[0].c_str(),text(h).c_str());TEST_ASSERT_FALSE(drive.masterOn);
+    out=usbStream(raw+std::string(MAX_COMMAND_BYTES,'\r')+"\n"+fill("{\"v\":1,\"id\":\"next\",\"cmd\":\"info\"}\r\n"));
+    TEST_ASSERT_EQUAL(2,out.size());TEST_ASSERT_NOT_NULL(strstr(out[0].c_str(),"FRAME_TOO_LARGE"));TEST_ASSERT_NOT_NULL(strstr(out[1].c_str(),"\"id\":\"next\""));TEST_ASSERT_FALSE(drive.masterOn);
+    out=usbStream(raw+"\r\n");TEST_ASSERT_EQUAL(1,out.size());TEST_ASSERT_NOT_NULL(strstr(out[0].c_str(),"\"ok\":true"));TEST_ASSERT_TRUE(drive.masterOn); // CRLF clients still work
+    drive.masterOn=false;
+    std::string at=padded("{\"v\":1,\"id\":\"a\",\"cmd\":\"status\"",MAX_COMMAND_BYTES);
+    out=usbStream(at+"\r\n");TEST_ASSERT_NOT_NULL(strstr(out[0].c_str(),"\"ok\":true"));
+    out=usbStream(at.substr(0,at.size()-2)+"x\"}\r\n");TEST_ASSERT_NOT_NULL(strstr(out[0].c_str(),"FRAME_TOO_LARGE"));
+    out=usbStream("{\"cmd\":\"status\"}\r\n");TEST_ASSERT_NOT_NULL(strstr(out[0].c_str(),"configRevision")); // legacy CRLF
+}
+// Independent of lib/strict_json so the check also runs against older builds.
+static bool utf8ok(const char* s){const unsigned char* p=(const unsigned char*)s;while(*p){int n=*p<0x80?1:(*p>>5)==6&&*p>=0xC2?2:(*p>>4)==14?3:(*p>>3)==30&&*p<=0xF4?4:0;if(!n)return false;
+    for(int i=1;i<n;++i)if((p[i]&0xC0)!=0x80)return false;if(n==3&&((*p==0xE0&&p[1]<0xA0)||(*p==0xED&&p[1]>0x9F)))return false;if(n==4&&((*p==0xF0&&p[1]<0x90)||(*p==0xF4&&p[1]>0x8F)))return false;p+=n;}return true;}
+// R4: only valid UTF-8 reaches settings; valid Unicode round-trips byte for byte
+static std::string configWithSsid(const std::string& ssidJson){
+    std::string cfg=settingsJson().c_str();size_t a=cfg.find("\"ssid\":\"");size_t b=cfg.find('"',a+8);return cfg.substr(0,a+8)+ssidJson+cfg.substr(b);
+}
+void invalid_utf8_refused_valid_unicode_round_trips(){
+    const char* bad[]={"\xff","ab\x80","\xc3","\xe2\x82","\xc0\xaf","\xed\xa0\x80","\xf4\x90\x80\x80","\\ud800"};
+    for(auto b:bad){
+        std::string before=state();uint32_t writes=LittleFS.writes;
+        std::string m=fill("{\"v\":1,\"id\":\"a\",\"cmd\":\"apply\",\"bootId\":\"$B\",\"client\":\"app\",\"revision\":$R,\"config\":"+configWithSsid(b)+"}");
+        expectError(usb(m),"BAD_JSON");expectError(http(m),"BAD_JSON");
+        std::string legacy="{\"cmd\":\"set_config\",\"config\":"+configWithSsid(b)+"}";expectError(usb(legacy),"BAD_JSON");
+        testMillis+=2000;settingsTick();TEST_ASSERT_EQUAL_STRING(before.c_str(),state().c_str());TEST_ASSERT_EQUAL(writes,LittleFS.writes);TEST_ASSERT_FALSE(settingsPreviewActive());
+    }
+    struct { const char* json; const char* bytes; } good[]={{"\xd0\x96\xd1\x83\xd0\xba \xf0\x9f\x98\x80","\xd0\x96\xd1\x83\xd0\xba \xf0\x9f\x98\x80"},{"\\u0416\\ud83d\\ude00 \xe2\x82\xac","\xd0\x96\xf0\x9f\x98\x80 \xe2\x82\xac"}};
+    for(auto& g:good){
+        expectOk(usb(fill("{\"v\":1,\"id\":\"a\",\"cmd\":\"apply\",\"bootId\":\"$B\",\"client\":\"app\",\"revision\":$R,\"config\":"+configWithSsid(g.json)+"}")));
+        auto s=usb(fill("{\"v\":1,\"id\":\"s\",\"cmd\":\"save\",\"bootId\":\"$B\",\"client\":\"app\",\"revision\":$R}"));expectOk(s);TEST_ASSERT_EQUAL(s["revision"].as<uint32_t>(),s["savedRevision"].as<uint32_t>());
+        std::string raw="{\"v\":1,\"id\":\"g\",\"cmd\":\"get_config\"}";String out=handleUsbLine(raw.data(),raw.size());
+        TEST_ASSERT_TRUE(utf8ok(out.c_str()));
+        DynamicJsonDocument d(32768);deserializeJson(d,out.c_str());TEST_ASSERT_EQUAL_STRING(g.bytes,d["result"]["config"]["network"]["ssid"]);
+        TEST_ASSERT_NOT_NULL(strstr(LittleFS.files["/config-v3.json"]->c_str(),g.bytes));
+    }
+}
+int main(){UNITY_BEGIN();RUN_TEST(nul_and_duplicate_keys_refused_without_effect);RUN_TEST(usb_cr_inside_body_is_not_removed);RUN_TEST(invalid_utf8_refused_valid_unicode_round_trips);RUN_TEST(envelope_shape_and_reads);RUN_TEST(http_and_usb_give_identical_result_and_effect);RUN_TEST(each_command_success_and_failure);RUN_TEST(envelope_validation);RUN_TEST(boot_revision_and_editor_conflicts);RUN_TEST(ota_blocks_every_mutation_on_every_path);RUN_TEST(size_limits);RUN_TEST(flash_failure_keeps_preview_and_lease);RUN_TEST(sse_v1_and_auth);RUN_TEST(legacy_payloads_unchanged);return UNITY_END();}

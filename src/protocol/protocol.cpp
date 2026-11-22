@@ -142,9 +142,13 @@ struct CountingReader { // detects trailing bytes after the root value
 };
 static Code parse(DynamicJsonDocument& doc,const char* data,size_t len,String& message) {
     if(doc.capacity()==0) { message="Out of memory"; return Code::InternalError; }
-    int syntax=strictjson::check(data,len,12);
-    if(syntax==2) { message="Message too complex"; return Code::FrameTooLarge; }
-    if(syntax) { message="Invalid JSON"; return Code::BadJson; }
+    switch(strictjson::check(data,len,12)) {
+        case strictjson::Ok: break;
+        case strictjson::TooDeep: message="Message too complex"; return Code::FrameTooLarge;
+        case strictjson::Forbidden: message="Strings must not contain U+0000"; return Code::InvalidArgument;
+        case strictjson::Duplicate: message="Duplicate object key"; return Code::InvalidArgument;
+        default: message="Invalid JSON (syntax or UTF-8)"; return Code::BadJson;
+    }
     CountingReader reader(data,data+len);
     auto err=deserializeJson(doc,reader,DeserializationOption::NestingLimit(12));
     if(err==DeserializationError::NoMemory || err==DeserializationError::TooDeep) { message="Message too complex"; return Code::FrameTooLarge; }
@@ -314,7 +318,9 @@ String handleUsbLine(const char* data,size_t len) {
 static String legacyError(int code,const String& text,int& http) { DynamicJsonDocument d(512); d["error"]=text.c_str(); http=code; String s; serializeJson(d,s); return s; }
 String legacyHttp(const char* route,const char* data,size_t len,int& http) {
     if(len>MAX_LEGACY_BYTES) return legacyError(413,"Config is too large",http);
-    DynamicJsonDocument doc(24576); if(deserializeJson(doc,data,len)) return legacyError(400,"Invalid JSON",http);
+    // Same strict syntax/UTF-8/NUL/duplicate-key rule as v1; legacy keeps its payload.
+    DynamicJsonDocument doc(24576);
+    if(strictjson::check(data,len,12)!=strictjson::Ok || deserializeJson(doc,data,len)) return legacyError(400,"Invalid JSON",http);
     JsonVariantConst d=doc.as<JsonVariantConst>();
     if(!strcmp(route,"/api/config")) {
         Outcome r=opLegacySetConfig(d); if(!r.ok()) return legacyError(400,r.message,http);
