@@ -119,13 +119,21 @@ void netTick() {
     consumeEvents(); uint32_t now=millis();
     bootAttempts.observeClients(apOn && WiFi.softAPgetStationNum()>0);
     if(session.phase==l8net::Session::Scan) {
-        if(session.expired(now)) { apOnly(); return; }
+        if(session.expired(now)) { sysLog(F("Wi-Fi boot scan deadline reached; AP only")); apOnly(); return; }
         if(scanPending) {
             if(!(WiFi.getStatusBits()&STA_STARTED_BIT)) return;
-            scanPending=false; WiFi.scanNetworks(true,false,false,120); return;
+            scanPending=false;
+            // Arduino 2.0.17 also derives its async timeout as 20 * this dwell.
+            // 120 ms gives only 2.4 s, less than a full scan observed on v3.
+            // The standard 300 ms gives the core 6 s; our own boot cap stays 5 s.
+            int result=WiFi.scanNetworks(true,false,false,300);
+            Serial.printf("Wi-Fi scan start t=%lu result=%d\n",millis(),result);
+            return;
         }
         int count=WiFi.scanComplete();
         if(count==WIFI_SCAN_RUNNING) return;
+        Serial.printf("Wi-Fi scan result t=%lu count=%d elapsed=%lu\n",now,count,now-session.since);
+        if(count<0) { sysLog(F("Wi-Fi boot scan failed; AP only")); apOnly(); return; }
         for(int i=0;i<count;++i) if(WiFi.SSID(i)==sessionSsid) {
             selected=true; selectedChannel=WiFi.channel(i); memcpy(selectedBssid,WiFi.BSSID(i),6); break;
         }
