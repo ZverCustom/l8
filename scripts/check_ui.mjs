@@ -51,4 +51,18 @@ const fallback=harness(undefined,{push:false});await flush();fallback.run("set('
 // Schema 4 / saved presets inherit their old global animation speed.
 const legacy=clone(config);legacy.schema=4;legacy.global.speed=42;legacy.presets[0]={used:true,name:'old',global:{speed:17},strips:clone(legacy.strips)};
 h.context.legacy=legacy;const migrated=h.run('migrateConfig(legacy)');assert.equal(migrated.schema,5);assert.equal(migrated.strips[0].speed,42);assert.equal(migrated.presets[0].strips[0].speed,17);
-console.log('PASS: small preview/coalescing, explicit save, structural apply, concurrent edits, startup retry, token renewal, ambiguous-write stop, revision conflict, validation recovery, SSE, hidden tabs, fallback, migration');
+// channelState: the firmware reason is authoritative; flags only add detail.
+const cs=c=>{h.context.ch=c;return h.run('channelState(ch)')};h.run('state.ioFault=false;state.totalBrightnessScale=1');
+const pending={on:false,fault:'overcurrent',retryPending:true,retryInMs:0,retries:0};
+for(const [reason,text] of [['novbat','Нет 12 В'],['ign','Ожидание IGN'],['master','Master выключен'],['inhibit','Выходы заблокированы'],['disabled','Канал запрещён'],['engine','Двигатель заглушен']]){const out=cs({...pending,reason});assert.ok(out.startsWith(text),reason+': '+out);assert.doesNotMatch(out,/ожидает разрешения/)}
+assert.equal(cs({...pending,reason:'retry',retryInMs:4200,retries:1}),'Повтор 2/3 через 5 с');
+assert.equal(cs({on:false,fault:'switch fault',retryPending:false,reason:'fault'}),'Защита силового ключа');
+assert.equal(cs({on:false,fault:'',retryPending:false,reason:'fault'}),'Защита канала');
+assert.equal(cs({on:true,fault:'',reason:'on',brightnessScale:1}),'Включён');
+assert.equal(cs({on:true,fault:'',reason:'on',brightnessScale:.5}),'Ограничение тока · 50% яркости');
+assert.equal(cs({on:false,fault:'',reason:'io'}),'Состояние неизвестно');
+for(const on of [true,false]){const out=cs({on,fault:'',reason:'future_code',brightnessScale:1});assert.equal(out,'Неизвестное состояние (future_code)');assert.doesNotMatch(out,/Включён/)}
+assert.equal(cs({on:false,fault:'overcurrent',retryPending:true,retryInMs:0,retries:0}),'Повтор ожидает разрешения питания');
+assert.equal(cs({on:false,fault:'',retryPending:false}),'Выключен');assert.equal(cs({on:true,fault:'',brightnessScale:1}),'Включён');
+h.run('state.ioFault=true');assert.equal(cs({on:false,fault:''}),'Состояние неизвестно');assert.equal(cs({on:false,fault:'',reason:'novbat'}),'Нет 12 В');h.run('state.ioFault=false');
+console.log('PASS: small preview/coalescing, explicit save, structural apply, concurrent edits, startup retry, token renewal, ambiguous-write stop, revision conflict, validation recovery, SSE, hidden tabs, fallback, migration, channel reason');

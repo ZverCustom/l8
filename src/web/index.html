@@ -87,14 +87,25 @@ function wifi(){return panel('Подключение',`<p class="hint" id="netLi
 function system(){return panel('Питание и запуск',form(field('global.autoStart','Включать Master при загрузке','checkbox')+field('global.allowWithoutIgn','Ленты работают без IGN','checkbox')+field('global.autoRetry','Повторы при перегрузке: 1 / 5 / 30 с','checkbox')+field('global.sensor5v','Питание датчиков 5 В','checkbox'))+`<p class="hint">Для лент нужны 9–16,5 В и включённый Master. Снимите галочку «Ленты работают без IGN», чтобы питание лент зависело от зажигания. Снятие IGN не выключает работающий контроллер и датчики.</p><div class="row"><button id="resetAll">Сбросить все защиты</button><button id="reboot">Перезагрузить</button></div>`)+panel('Конфигурация',`<div class="row"><button id="export">Скачать резервную копию</button><label class="field">Восстановить JSON<input id="import" type="file" accept=".json,application/json"></label></div><p class="hint">Копия содержит настройки, пресеты и пароль Wi-Fi. При применении Master сохраняет своё состояние. После загрузки файла проверьте настройки и нажмите «Сохранить».</p>`)+panel('Прошивка',`<p class="hint" id="buildLive">—</p><div class="row"><input id="firmware" type="file" accept=".bin" style="max-width:340px"><button id="ota">Обновить прошивку</button></div><p class="hint">Выберите firmware.bin для L8 v3. Во время обновления выходы выключены. Новая версия подтверждается после самопроверки; при неудаче загрузчик возвращает предыдущую.</p><p id="otaState" class="hint"></p>`)+panel('Журнал',`<button id="readLog">Обновить журнал</button><pre id="log">Журнал загрузки и работы контроллера.</pre>`)}
 function render(){if(!config)return;$('title').textContent=pages[page];$('nav').innerHTML=pages.map((p,i)=>`<button data-page="${i}" class="${page===i?'active':''}">${p}</button>`).join('');$('view').innerHTML=[overview,channels,inputs,can,imu,wifi,system][page]();updateLive()}
 function put(id,value){if($(id))$(id).textContent=value}
+const FAULT_TEXT={overcurrent:'Перегрузка — защёлка','switch fault':'Защита силового ключа','invalid sample':'Ошибка измерения'};
+const REASON_TEXT={master:'Master выключен',novbat:'Нет 12 В',ign:'Ожидание IGN',inhibit:'Выходы заблокированы',disabled:'Канал запрещён',engine:'Двигатель заглушен',io:'Состояние неизвестно'};
+function retryText(c){return c.retryInMs>0?`Повтор ${c.retries+1}/3 через ${Math.ceil(c.retryInMs/1000)} с`:'Повтор ожидает разрешения питания'}
+function onText(c){const cap=(c.brightnessScale??1)*(state.totalBrightnessScale??1);return cap<.99?`Ограничение тока · ${Math.round(cap*100)}% яркости`:'Включён'}
 function channelState(c){
+ // The power task picks the reason; the UI only translates it and adds detail.
+ if(typeof c.reason==='string'){
+  if(c.reason==='on')return onText(c);
+  if(c.reason==='retry')return retryText(c);
+  if(c.reason==='fault')return FAULT_TEXT[c.fault]||c.fault||'Защита канала';
+  const why=REASON_TEXT[c.reason];
+  if(!why)return `Неизвестное состояние (${c.reason})`;
+  return c.retryPending?why+' · повтор после восстановления':why;
+ }
+ // Legacy status without reason (firmware before P1-A).
  if(state.ioFault)return 'Состояние неизвестно';
- if(c.retryPending)return c.retryInMs>0?`Повтор ${c.retries+1}/3 через ${Math.ceil(c.retryInMs/1000)} с`:'Повтор ожидает разрешения питания';
- if(c.fault)return ({overcurrent:'Перегрузка — защёлка','switch fault':'Защита силового ключа','invalid sample':'Ошибка измерения'})[c.fault]||c.fault;
- const why={master:'Master выключен',novbat:'Нет 12 В',ign:'Ожидание IGN',inhibit:'Выходы заблокированы',disabled:'Канал запрещён',engine:'Двигатель заглушен',io:'Состояние неизвестно'}[c.reason];
- if(!c.on&&why)return why;
- const cap=(c.brightnessScale??1)*(state.totalBrightnessScale??1);
- return c.on?(cap<.99?`Ограничение тока · ${Math.round(cap*100)}% яркости`:'Включён'):'Выключен';
+ if(c.retryPending)return retryText(c);
+ if(c.fault)return FAULT_TEXT[c.fault]||c.fault;
+ return c.on?onText(c):'Выключен';
 }
 function updateLive(){if(!state)return;put('vbat',num(state.vbat)+' В');put('ign',state.ign?'вкл.':'выкл.');put('total',num(state.totalAmps)+' А');put('powerStatus',state.powerStatus);put('version',state.firmware);put('ip',state.ip);put('master','Master · '+(state.master?'вкл.':'выкл.'));$('master').className=state.master?'primary':'';
  for(const n of ['rpm','speed','temp','throttle'])put('m-'+n,state.dataFresh?state[n]:'—');
