@@ -52,7 +52,7 @@ static void encodeStrip(JsonObject o,const StripSettings& s,int count) {
 }
 static void encodeCan(JsonObject o,const CanSettings& c) { o["minRpm"]=c.minRPM; o["maxRpm"]=c.maxRPM; o["speed"]=c.speed; o["brightness"]=c.brightess; }
 String settingsJson(bool secrets,bool baseline) {
-    pullLive(); const SavedData& data=((secrets || baseline) && previewActive)?previewBase:savedData; DynamicJsonDocument doc(24576); doc["schema"]=5;
+    pullLive(); const SavedData& data=((secrets || baseline) && previewActive)?previewBase:savedData; DynamicJsonDocument doc(24576); doc["schema"]=L8_CONFIG_SCHEMA;
     auto g=doc.createNestedObject("global"); encodeCan(g,data.can_setting);
     g["autoRetry"]=data.autoRetry; g["autoStart"]=data.autoStart; g["allowWithoutIgn"]=data.allowWithoutIgn; g["sensor5v"]=data.sensor5v;
     g["shiftRpm"]=data.drive.shiftRPM; g["shiftColor"]=data.drive.shiftColor; g["engineOff"]=data.drive.engineOff;
@@ -100,7 +100,7 @@ bool settingsApply(JsonVariantConst value,String& error) {
     for(auto key:{"accOffset","gyroOffset"}) if(!g[key].is<JsonArrayConst>() || g[key].size()!=3) return fail("Invalid IMU offsets");
     for(int i=0;i<3;++i) { if(!number(g["accOffset"][i],-4,4)||!number(g["gyroOffset"][i],-500,500)) return fail("Invalid IMU offset range"); d.accOff[i]=g["accOffset"][i]; d.gyrOff[i]=g["gyroOffset"][i]; }
     if(!o["strips"].is<JsonArrayConst>()||o["strips"].size()!=8) return fail("Expected eight strips");
-    for(int i=0;i<8;++i) { auto s=o["strips"][i].as<JsonObjectConst>(); if(!decodeStrip(s,next.stripSettings[i],next.numLeds[i],next.can_setting.speed,o["schema"])||!number(s["maxAmps"],.5,5)||!number(s["currentCal"],.3,3)) return fail("Invalid strip setting (8..1000 LEDs, 0.5..5 A)"); next.channelMaxAmps[i]=s["maxAmps"]; next.channelCal[i]=s["currentCal"]; }
+    for(int i=0;i<8;++i) { auto s=o["strips"][i].as<JsonObjectConst>(); if(!decodeStrip(s,next.stripSettings[i],next.numLeds[i],next.can_setting.speed,o["schema"])||!number(s["maxAmps"],.5,L8_MAX_CHANNEL_AMPS)||!number(s["currentCal"],.3,3)) return fail("Invalid strip setting (8..1000 LEDs, 0.5..5 A)"); next.channelMaxAmps[i]=s["maxAmps"]; next.channelCal[i]=s["currentCal"]; }
     if(!o["inputs"].is<JsonArrayConst>()||o["inputs"].size()!=3) return fail("Expected three inputs");
     for(int i=0;i<3;++i) { auto p=o["inputs"][i]; if(!integer(p["mode"],0,2)||!number(p["low"],0,16)||!number(p["high"],0,16)||p["high"].as<float>()<=p["low"].as<float>()||!number(p["thresholdMv"],0,3100)) return fail("Invalid input setting"); next.inputs[i]={p["mode"],p["low"],p["high"],p["thresholdMv"]}; }
     if(!integer(o["can"]["mode"],0,3)||!integer(o["can"]["bitrate"],0,5)) return fail("Invalid CAN setting");
@@ -132,7 +132,7 @@ bool settingsApply(JsonVariantConst value,String& error) {
     return true;
 }
 static bool readConfig(const char* path) {
-    File file=LittleFS.open(path,"r"); if(!file||file.size()>24000) return false;
+    File file=LittleFS.open(path,"r"); if(!file||file.size()>L8_MAX_CONFIG_BYTES) return false;
     DynamicJsonDocument doc(24576); auto result=deserializeJson(doc,file); file.close();
     String error; bool ok=!result && settingsApply(doc.as<JsonVariantConst>(),error);
     if(ok && doc["schema"].as<int>()<5) settingsSave(); // write schema 5 atomically after startup
@@ -173,7 +173,7 @@ static void restorePreview() {
     previewActive=false; previewOwner=""; ++revision;
 }
 void settingsTick() {
-    if(previewActive && millis()-previewTouched>=60000) {
+    if(previewActive && millis()-previewTouched>=L8_PREVIEW_LEASE_MS) {
         int mode=canMode, rate=canBitrateSel;
         restorePreview();
         if(mode!=canMode) vehicleSetMode(canMode); else if(rate!=canBitrateSel) vehicleSetBitrate(canBitrateSel);

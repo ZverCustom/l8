@@ -6,6 +6,10 @@
 #include "led_control/led_control.h"
 
 #define NUM_PRESETS 3
+#define L8_CONFIG_SCHEMA 5
+#define L8_MAX_CONFIG_BYTES 24000
+#define L8_PREVIEW_LEASE_MS 60000
+#define L8_MAX_CHANNEL_AMPS 5
 
 struct DriveSettings {
     bool masterOn;        // global output switch

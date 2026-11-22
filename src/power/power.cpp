@@ -4,11 +4,13 @@
 #include "settings/settings.h"
 #include "vehicle/vehicle.h"
 #include <v3_safety.h>
+#include <channel_reason.h>
+static_assert(uint8_t(v3::Reason::Io)==1,"ChannelPower::reason defaults to io");
 #include <driver/gpio.h>
 #include <current_control.h>
 struct Request {
     float totalMaxAmps=0; bool autoRetry=true;
-    bool master=false, allowWithoutIgn=false, sensor=false, inhibit=false, silent=true;
+    bool master=false, masterRequested=false, engineCut=false, allowWithoutIgn=false, sensor=false, inhibit=false, silent=true;
     bool enabled[8]={};
     float maxAmps[8]={}, calibration[8]={};
     int inputMode[3]={}; float low[3]={}, high[3]={}, threshold[3]={};
@@ -25,11 +27,13 @@ void powerInhibit(bool value) { portENTER_CRITICAL(&stateMux); request.inhibit=v
 void powerCanSilent(bool value) { portENTER_CRITICAL(&stateMux); request.silent=value; portEXIT_CRITICAL(&stateMux); }
 void powerResetLatch(int ch) { portENTER_CRITICAL(&stateMux); resetMask |= ch<0 ? 0x1ff : (ch<8 ? (1u<<ch) : 0); portEXIT_CRITICAL(&stateMux); }
 void powerSampleAdc() {}
+const char* powerReasonName(uint8_t v) { return v3::reasonName(v3::Reason(v)); }
 const char* powerFaultName(uint8_t v) { return v==1 ? "overcurrent" : v==2 ? "switch fault" : v==4 ? "invalid sample" : ""; }
 void powerTick() {
     Request next;
     next.master=drive.masterOn; next.autoRetry=savedData.autoRetry; next.totalMaxAmps=drive.powerLimitMa/1000.f;
     bool parked=savedData.cutPowerEngineOff && drive.engineOff==2 && !engineRunning();
+    next.masterRequested=drive.masterOn; next.engineCut=parked;
     if(parked) next.master=false;
     next.allowWithoutIgn=savedData.allowWithoutIgn; next.sensor=savedData.sensor5v;
     for(int i=0;i<8;++i) { next.enabled[i]=stripSettings[i].enabled; next.maxAmps[i]=savedData.channelMaxAmps[i]; next.calibration[i]=savedData.channelCal[i]; }
@@ -120,6 +124,13 @@ static void safetyTask(void*) {
             s.sensorOn=false;
         }
         s.ioOk=ok;
+        // Diagnostic only, from the inputs this cycle used; switching above is unchanged.
+        for(int i=0;i<8;++i) {
+            auto& ch=s.channels[i];
+            v3::ReasonInputs r{ok && initOk && !s.ioLatched, protection[i].fault!=l8power::Channel::None, protection[i].waiting,
+                cfg.inhibit, v3::supplyValid(s.vbat), s.ign||cfg.allowWithoutIgn, cfg.masterRequested, cfg.enabled[i], cfg.engineCut, ch.on};
+            ch.reason=uint8_t(v3::channelReason(r));
+        }
         for(int i=0;i<3;++i) {
             if(previousModes[i]!=cfg.inputMode[i]) {
                 previousModes[i]=cfg.inputMode[i];

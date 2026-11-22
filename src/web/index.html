@@ -91,6 +91,8 @@ function channelState(c){
  if(state.ioFault)return 'Состояние неизвестно';
  if(c.retryPending)return c.retryInMs>0?`Повтор ${c.retries+1}/3 через ${Math.ceil(c.retryInMs/1000)} с`:'Повтор ожидает разрешения питания';
  if(c.fault)return ({overcurrent:'Перегрузка — защёлка','switch fault':'Защита силового ключа','invalid sample':'Ошибка измерения'})[c.fault]||c.fault;
+ const why={master:'Master выключен',novbat:'Нет 12 В',ign:'Ожидание IGN',inhibit:'Выходы заблокированы',disabled:'Канал запрещён',engine:'Двигатель заглушен',io:'Состояние неизвестно'}[c.reason];
+ if(!c.on&&why)return why;
  const cap=(c.brightnessScale??1)*(state.totalBrightnessScale??1);
  return c.on?(cap<.99?`Ограничение тока · ${Math.round(cap*100)}% яркости`:'Включён'):'Выключен';
 }

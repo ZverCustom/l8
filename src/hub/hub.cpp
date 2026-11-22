@@ -8,6 +8,7 @@
 #include <LittleFS.h>
 #include <esp_ota_ops.h>
 #include <esp32s3/spiram.h>
+#include <esp_mac.h>
 #include "settings/settings.h"
 #include "net/net.h"
 #include "power/power.h"
@@ -18,6 +19,7 @@
 #include <channel_map.h>
 #include <v3_safety.h>
 #include "l8_ui.h"
+#include "led_control/led_control.h"
 class StreamWebServer: public WebServer {
 public:
     using WebServer::WebServer;
@@ -44,13 +46,29 @@ static void streamTick() {
     }
     if(due) lastStatus=now;
 }
-static String token, serialLine;
+static String token, serialLine, deviceId, bootId;
 static uint32_t rebootAt=0, reconnectAt=0;
 static bool updating=false, uploadOk=false;
 static String uploadError;
 static bool bootConfirmed=false;
 static void syncHubInhibit() {
     powerInhibit(!ledsHealthy() || v3::hubInhibited(bootConfirmed,updating,uploadOk,rebootAt!=0));
+}
+// Single source for GET /api/info and USB {"cmd":"info"}. Capabilities list only
+// what this build implements; commands.v1/savedRevision/preview.v1 come with P1-B/C.
+String hubInfoJson() {
+    DynamicJsonDocument d(1536);
+    d["product"]="ZVER L8"; d["hardware"]=3; d["deviceId"]=deviceId; d["bootId"]=bootId;
+    d["firmware"]=L8_FW_VERSION; d["build"]=GIT_REV;
+    auto protocol=d.createNestedObject("protocol"); protocol["major"]=1; protocol["minor"]=0;
+    d["configSchema"]=L8_CONFIG_SCHEMA;
+    auto transports=d.createNestedArray("transports"); transports.add("http"); transports.add("usb");
+    auto caps=d.createNestedArray("capabilities"); caps.add("info.v1"); caps.add("channel.reason"); caps.add("ota.http");
+    auto l=d.createNestedObject("limits");
+    l["channels"]=8; l["maxCommandBytes"]=L8_MAX_CONFIG_BYTES; l["maxConfigBytes"]=L8_MAX_CONFIG_BYTES;
+    l["maxLedCount"]=MAX_LEDS; l["maxChannelAmps"]=L8_MAX_CHANNEL_AMPS; l["previewLeaseMs"]=L8_PREVIEW_LEASE_MS;
+    l["previewIntervalMs"]=100; l["statusIntervalMs"]=500; l["maxSseClients"]=sizeof(streams)/sizeof(streams[0]);
+    String out; serializeJson(d,out); return out;
 }
 String hubStatusJson() {
     auto p=powerSnapshot(); DynamicJsonDocument d(8192);
@@ -68,7 +86,7 @@ String hubStatusJson() {
     d["canStatus"]=canStatusString(); d["canBitrate"]=canBitrateString(); d["dataFresh"]=vehicleDataFresh();
     d["rpm"]=vehicle.rpm; d["speed"]=vehicle.speed; d["temp"]=vehicle.temp; d["throttle"]=vehicle.throttle;
     auto channels=d.createNestedArray("channels");
-    for(int i=0;i<8;++i) { auto c=channels.createNestedObject(); c["brightnessScale"]=p.channels[i].brightnessScale; c["retries"]=p.channels[i].retries; c["retryPending"]=p.channels[i].retryPending; c["retryInMs"]=p.channels[i].retryInMs; c["on"]=p.channels[i].on; c["amps"]=p.channels[i].amps; c["fault"]=powerFaultName(p.channels[i].fault); c["isVolts"]=p.channels[i].isVolts; c["data"]=bool(boardDataMask()&v3::channelMask(i)); c["legacyIndex"]=v3::hardwareChannel(i); auto pins=c.createNestedArray("pins"); pins.add(v3::CHANNELS[i].power); pins.add(v3::CHANNELS[i].data); pins.add(v3::CHANNELS[i].ground); }
+    for(int i=0;i<8;++i) { auto c=channels.createNestedObject(); c["brightnessScale"]=p.channels[i].brightnessScale; c["retries"]=p.channels[i].retries; c["retryPending"]=p.channels[i].retryPending; c["retryInMs"]=p.channels[i].retryInMs; c["on"]=p.channels[i].on; c["amps"]=p.channels[i].amps; c["fault"]=powerFaultName(p.channels[i].fault); c["reason"]=powerReasonName(p.channels[i].reason); c["isVolts"]=p.channels[i].isVolts; c["data"]=bool(boardDataMask()&v3::channelMask(i)); c["legacyIndex"]=v3::hardwareChannel(i); auto pins=c.createNestedArray("pins"); pins.add(v3::CHANNELS[i].power); pins.add(v3::CHANNELS[i].data); pins.add(v3::CHANNELS[i].ground); }
     auto inputs=d.createNestedArray("inputs"); for(int i=0;i<3;++i) { auto x=inputs.createNestedObject(); x["mv"]=p.inputMv[i]; x["volts"]=p.inputMv[i]*.0053f; x["value"]=p.inputValue[i]; }
     auto m=d.createNestedObject("imu"); m["ok"]=imu.ok; m["ax"]=imu.ax; m["ay"]=imu.ay; m["az"]=imu.az; m["gx"]=imu.gx; m["gy"]=imu.gy; m["gz"]=imu.gz; m["temp"]=imu.temp; m["lateralG"]=imuLateralG(); m["yaw"]=imuYawRate();
     d["otaConfirmed"]=bootConfirmed;
@@ -131,11 +149,16 @@ static void upload() {
     }
 }
 void setupHub() {
+    uint8_t mac[6]={}; esp_efuse_mac_get_default(mac);
+    char id[16]; snprintf(id,sizeof(id),"L8-%02X%02X%02X%02X%02X%02X",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]); deviceId=id;
+    // Wi-Fi is already started (netBegin), so esp_random() draws from the hardware RNG.
+    char b[33]; snprintf(b,sizeof(b),"%08lx%08lx%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random()); bootId=b;
     char t[33]; snprintf(t,sizeof(t),"%08lx%08lx%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random()); token=t;
     const char* headers[]={"X-L8-Token"}; server.collectHeaders(headers,1);
     server.on("/",HTTP_GET,[] { server.sendHeader("Content-Encoding","gzip"); server.sendHeader("Cache-Control","no-cache"); server.send_P(200,"text/html",(const char*)L8_UI,L8_UI_SIZE); });
     server.on("/api/session",HTTP_GET,[] { send(200,"{\"token\":\""+token+"\"}"); });
     server.on("/api/status",HTTP_GET,[] { send(200,hubStatusJson()); });
+    server.on("/api/info",HTTP_GET,[] { send(200,hubInfoJson()); });
     server.on("/api/events",HTTP_GET,[] {
         if(server.arg("token")!=token) { error(403,"Session expired"); return; }
         for(auto& s:streams) if(!s.client || !s.client.connected()) {
@@ -174,7 +197,7 @@ void setupHub() {
     auto captive=[] { server.sendHeader("Location","http://"+WiFi.softAPIP().toString()+"/"); server.send(302,"text/plain",""); };
     for(const char* path:{"/generate_204","/gen_204","/hotspot-detect.html","/library/test/success.html","/connecttest.txt","/ncsi.txt"}) server.on(path,HTTP_GET,captive);
     server.onNotFound([] { if(server.uri().startsWith("/api/")) { error(404,"Not found"); return; } server.sendHeader("Location","/"); server.send(302,"text/plain",""); });
-    server.begin(); Serial.println("L8 configurator ready; USB JSON: status / get_config / set_config / action");
+    server.begin(); Serial.println("L8 configurator ready; USB JSON: info / status / get_config / set_config / action");
 }
 static void serialTick() {
     static bool discardLine=false;
@@ -189,6 +212,7 @@ static void serialTick() {
         else {
             const char* cmd=d["cmd"]|"";
             if(!strcmp(cmd,"status")) out=hubStatusJson();
+            else if(!strcmp(cmd,"info")) out=hubInfoJson();
             else if(!strcmp(cmd,"get_config")) out=settingsJson(false,true);
             else {
                 String e; bool ok=false; int mode=canMode,rate=canBitrateSel;

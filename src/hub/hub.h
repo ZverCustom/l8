@@ -3,3 +3,4 @@
 void setupHub();
 void updateHub();
 String hubStatusJson();
+String hubInfoJson();

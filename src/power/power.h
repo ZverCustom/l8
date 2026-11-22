@@ -1,6 +1,6 @@
 #pragma once
 #include <Arduino.h>
-struct ChannelPower { float brightnessScale=1; uint8_t retries=0; uint32_t retryInMs=0; bool retryPending=false; float amps=0, isVolts=0; bool on=false; uint8_t fault=0; uint32_t sampleAt=0; };
+struct ChannelPower { float brightnessScale=1; uint8_t retries=0; uint32_t retryInMs=0; bool retryPending=false; float amps=0, isVolts=0; bool on=false; uint8_t fault=0, reason=1 /* io until the power task reports */; uint32_t sampleAt=0; };
 struct PowerState {
     float vbat=0, ledAmps=0, isVolts=0, totalBrightnessScale=1;
     bool inhibited=false;
@@ -21,3 +21,4 @@ void powerCanSilent(bool silent);
 PowerState powerSnapshot();
 String powerStatusString();
 const char* powerFaultName(uint8_t fault);
+const char* powerReasonName(uint8_t reason);
