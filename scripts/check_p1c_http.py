@@ -21,7 +21,7 @@ def check(n, v):
     results.append(n); print('PASS', n, flush=True)
 def err(r, code): return r.get('ok') is False and r.get('error', {}).get('code') == code
 def retry(fn):
-    for a in range(6):
+    for a in range(12):
         try: return fn()
         except urllib.error.HTTPError: raise
         except (urllib.error.URLError, TimeoutError, ConnectionError, socket.timeout, OSError) as e:

@@ -51,6 +51,19 @@ try:
     check('unknown cmd -> UNKNOWN_COMMAND', err(usb({'v': 1, 'id': 'e', 'cmd': 'nope'}), 'UNKNOWN_COMMAND'))
     r = usb({'v': 1, 'id': 'e', 'cmd': 'action', 'bootId': boot, 'action': 'master', 'on': 'true'})
     check('string boolean refused, Master unchanged', err(r, 'INVALID_ARGUMENT') and not legacy({'cmd': 'status'})['master'])
+    # R2-R4: NUL, duplicate keys, raw CR in body, invalid UTF-8, CRLF still fine
+    r = send_raw(('{"v":1,"id":"x","cmd":"action\\u0000junk","bootId":"%s","action":"master","on":true}\n' % boot).encode())[0]
+    check('NUL in cmd -> INVALID_ARGUMENT, Master off', err(r, 'INVALID_ARGUMENT') and not legacy({'cmd': 'status'})['master'])
+    r = send_raw(('{"v":1,"id":"x","cmd":"action","bootId":"%s","action":"master","on":false,"on":true}\n' % boot).encode())[0]
+    check('duplicate key -> INVALID_ARGUMENT, Master off', err(r, 'INVALID_ARGUMENT') and not legacy({'cmd': 'status'})['master'])
+    r = send_raw(('{"v":1,"id":"x","cmd":"act\rion","bootId":"%s","action":"master","on":true}\n' % boot).encode())[0]
+    check('raw CR inside body -> BAD_JSON, Master off', err(r, 'BAD_JSON') and not legacy({'cmd': 'status'})['master'])
+    bad_cfg = json.dumps(original, separators=(',', ':')).encode().replace(b'"ssid":"', b'"ssid":"\xff', 1)
+    rev0 = usb({'v': 1, 'id': 'r', 'cmd': 'status'})['revision']
+    r = send_raw(b'{"v":1,"id":"u","cmd":"apply","bootId":"' + boot.encode() + b'","client":"usb-check","revision":' + str(rev0).encode() + b',"config":' + bad_cfg + b'}\n')[0]
+    st = legacy({'cmd': 'status'})
+    check('0xFF byte in config -> BAD_JSON, no preview, revision unchanged', err(r, 'BAD_JSON') and not st['previewActive'] and st['configRevision'] == rev0)
+    r = send_raw(b'{"v":1,"id":"crlf","cmd":"info"}\r\n')[0]; check('CRLF command accepted', r['ok'] and r['id'] == 'crlf')
     # framing: oversize line, then a valid command in the same write
     big = b'{"v":1,"id":"big","cmd":"status","pad":"' + b'x' * 24600 + b'"}\n'
     replies = send_raw(big + b'{"v":1,"id":"after","cmd":"info"}\n', replies=2, timeout=20)
@@ -89,7 +102,7 @@ try:
         base = f"http://{st['ip']}"
         # Lossy link (ping loss seen): retry only requests that are reads or refused by validation.
         def retry(fn):
-            for attempt in range(5):
+            for attempt in range(12):
                 try: return fn()
                 except (urllib.error.URLError, TimeoutError, ConnectionError, socket.timeout) as e:
                     if isinstance(e, urllib.error.HTTPError): raise
