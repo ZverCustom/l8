@@ -5,26 +5,28 @@ import vm from 'node:vm';
 const source=readFileSync(new URL('../src/web/index.html',import.meta.url),'utf8').split('<script>')[1].split('</script>')[0];
 const clone=x=>JSON.parse(JSON.stringify(x));
 const config={schema:5,global:{brightness:30,speed:60,autoRetry:true},network:{ssid:'test',password:'',keepPassword:true},can:{mode:2,bitrate:1},inputs:Array.from({length:3},()=>({})),presets:Array.from({length:3},()=>({used:false,name:''})),strips:Array.from({length:8},()=>({count:60,maxAmps:3,color:0xff0000,speed:60,brightness:30}))};
-const state={master:true,configRevision:10,channels:Array.from({length:8},()=>({amps:.2,pins:[1,10,26]})),inputs:[],imu:{ok:true}};
+const state={master:true,configRevision:10,savedRevision:10,bootId:'boot-a',previewActive:false,channels:Array.from({length:8},()=>({amps:.2,pins:[1,10,26]})),inputs:[],imu:{ok:true}};
 const normal=url=>url.endsWith('session')?{token:'session'}:url.endsWith('status')?clone(state):clone(config);
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 function harness(handler,{push=true}={}){
- const elements=new Map(),timers=new Map(),calls=[],listeners={},events=[];let id=0,revision=10;
+ const elements=new Map(),timers=new Map(),calls=[],listeners={},events=[];let id=0,revision=10,saved=10;
  const element=name=>{if(!elements.has(name))elements.set(name,{style:{},classList:{add(){},remove(){}},querySelector(){return null},textContent:'',innerHTML:'',disabled:false});return elements.get(name)};
  class EventSource{constructor(url){this.url=url;this.listeners={};events.push(this)}addEventListener(name,fn){this.listeners[name]=fn}close(){this.closed=true}}
  const context=vm.createContext({AbortController,console,...(push?{EventSource}:{}),document:{getElementById:element,querySelector(){return null},addEventListener(name,fn){(listeners[name]??=[]).push(fn)}},setTimeout(fn,ms){timers.set(++id,{fn,ms});return id},clearTimeout(id){timers.delete(id)},fetch:async(url,options)=>{
   calls.push({url,options});let result=handler?await handler(url,options):undefined;
-  if(result===undefined)result=options.method==='POST'?{ok:true,master:true,revision:++revision}:normal(url);
+  if(result===undefined)result=options.method==='POST'?(url==='/api/touch'||url==='/api/action'?{ok:true,master:true,revision,savedRevision:saved}:(()=>{const r=++revision;if(url==='/api/save')saved=r;return {ok:true,master:true,revision:r,savedRevision:saved}})()):normal(url);
   return {ok:!result.status||result.status===200,status:result.status||200,text:async()=>JSON.stringify(result.body??result)};
  }});
  vm.runInContext(source,context);
- return {context,element,timers,calls,events,run:code=>vm.runInContext(code,context),emit:(name,event={})=>(listeners[name]??[]).forEach(fn=>fn(event)),tick:async ms=>{const t=[...timers].find(([,t])=>t.ms===ms);assert.ok(t,'timer '+ms);timers.delete(t[0]);t[1].fn();await flush()}};
+ return {context,element,timers,calls,events,run:code=>vm.runInContext(code,context),emit:(name,event={})=>(listeners[name]??[]).forEach(fn=>fn(event)),tick:async ms=>{const t=[...timers].find(([,t])=>t.ms===ms);assert.ok(t,'timer '+ms);timers.delete(t[0]);t[1].fn();await flush()},tickIf:async ms=>{const t=[...timers].find(([,t])=>t.ms===ms);if(!t)return false;timers.delete(t[0]);t[1].fn();await flush();return true}};
 }
 const h=harness();await flush();assert.match(h.element('view').innerHTML,/Восемь каналов/);assert.equal(h.events.length,1);
 // Coalesce slider inputs into one small patch; Save sends only a revision.
-h.run("set('strips.1.color',255);set('strips.1.brightness',20);set('strips.1.brightness',21)");
-await h.tick(100);let calls=h.calls.filter(c=>c.options.method==='POST');assert.equal(calls.length,1);assert.equal(calls[0].url,'/api/preview');
-const patch=JSON.parse(calls[0].options.body);assert.deepEqual(patch.patch,{color:255,brightness:21});assert.equal(patch.strip,1);assert.ok(calls[0].options.body.length<250);
+// First input goes out at once; inputs during the interval coalesce to the latest values.
+h.run("set('strips.1.color',255);set('strips.1.brightness',20);set('strips.1.brightness',21)");await flush();
+let calls=h.calls.filter(c=>c.options.method==='POST');assert.equal(calls.length,1);assert.equal(calls[0].url,'/api/preview');assert.deepEqual(JSON.parse(calls[0].options.body).patch,{color:255});
+await h.tick(100);calls=h.calls.filter(c=>c.options.method==='POST');assert.equal(calls.length,2);
+const patch=JSON.parse(calls[1].options.body);assert.deepEqual(patch.patch,{brightness:21});assert.equal(patch.strip,1);assert.ok(calls[1].options.body.length<250);
 let before=h.calls.length;await h.element('save').onclick();assert.equal(h.calls.length-before,1);assert.equal(h.calls.at(-1).url,'/api/save');assert.equal(JSON.parse(h.calls.at(-1).options.body).config,undefined);assert.equal(h.run('dirty'),false);assert.equal(h.run('state.master'),true);
 // Structural edits apply in RAM first; write is a distinct checked revision.
 h.run("set('global.brightness',25)");before=h.calls.length;await h.element('save').onclick();assert.deepEqual(h.calls.slice(before).map(c=>c.url),['/api/apply','/api/save']);
@@ -35,7 +37,10 @@ assert.equal(concurrent.run('dirty'),true);assert.equal(concurrent.run('config.s
 // Startup timeout retries, but ambiguous writes never retry automatically.
 let stall=true;const retry=harness((url,options)=>stall?new Promise((_,reject)=>options.signal.addEventListener('abort',()=>reject(Object.assign(Error('aborted'),{name:'AbortError'})))):undefined);
 await flush();await retry.tick(8000);assert.match(retry.element('view').innerHTML,/Повторяем подключение/);stall=false;await retry.tick(2000);assert.match(retry.element('view').innerHTML,/Восемь каналов/);
-let writes=0;const lost=harness((url,options)=>{if(options.method==='POST'){writes++;throw Error('connection lost')}});await flush();lost.run("set('strips.0.color',255)");await lost.element('save').onclick();assert.equal(writes,1);assert.equal(lost.run('dirty'),true);assert.ok(lost.run('previewError'));
+// A lost write is never replayed by timers; only an explicit Save retries, after reading status.
+let writes=0;const lost=harness((url,options)=>{if(options.method==='POST'){writes++;throw Error('connection lost')}});await flush();lost.run("set('strips.0.color',255)");await flush();
+assert.equal(writes,1);assert.ok(lost.run('previewError'));await lost.tick(100);lost.run("set('strips.0.color',254)");await flush();assert.equal(writes,1);
+let mark=lost.calls.length;await lost.element('save').onclick();assert.deepEqual(lost.calls.slice(mark).map(c=>c.url),['/api/status','/api/apply']);assert.equal(writes,2);assert.equal(lost.run('dirty'),true);assert.ok(lost.run('previewError'));
 // Explicit 403 renews the token once; rejected revision is not overwritten.
 let rejects=0;const expired=harness((url,options)=>options.method==='POST'&&++rejects===1?{status:403,body:{error:'Session expired'}}:undefined);
 await flush();expired.run("set('strips.0.color',255)");await expired.element('save').onclick();assert.equal(rejects,3);assert.equal(expired.run('dirty'),false);
@@ -65,4 +70,58 @@ for(const on of [true,false]){const out=cs({on,fault:'',reason:'future_code',bri
 assert.equal(cs({on:false,fault:'overcurrent',retryPending:true,retryInMs:0,retries:0}),'Повтор ожидает разрешения питания');
 assert.equal(cs({on:false,fault:'',retryPending:false}),'Выключен');assert.equal(cs({on:true,fault:'',brightnessScale:1}),'Включён');
 h.run('state.ioFault=true');assert.equal(cs({on:false,fault:''}),'Состояние неизвестно');assert.equal(cs({on:false,fault:'',reason:'novbat'}),'Нет 12 В');h.run('state.ioFault=false');
-console.log('PASS: small preview/coalescing, explicit save, structural apply, concurrent edits, startup retry, token renewal, ambiguous-write stop, revision conflict, validation recovery, SSE, hidden tabs, fallback, migration, channel reason');
+// ---- P1-D live preview ----
+const posts=x=>x.calls.filter(c=>c.options.method==='POST');
+const bodyOf=c=>JSON.parse(c.options.body);
+// 1. Continuous input faster than the interval for >1 s: sends keep coming, each carries the latest value.
+{const x=harness();await flush();let v=0;
+ for(let step=0;step<40;step++){x.run(`set('strips.2.brightness',${++v})`);await flush();if(step%3===2)await x.tickIf(100)} // 30 ms input pitch, 40 inputs = 1.2 s
+ await x.tickIf(100);const sent=posts(x);assert.ok(sent.length>=13&&sent.length<=15,'sends during continuous input: '+sent.length);
+ assert.equal(bodyOf(sent.at(-1)).patch.brightness,40);for(let i=1;i<sent.length;i++)assert.ok(bodyOf(sent[i]).patch.brightness>bodyOf(sent[i-1]).patch.brightness);}
+// 2. Response slower than the interval: one change request in flight, then only the latest values.
+{let open=0,maxOpen=0,hold=[];const x=harness((url,o)=>{if(o.method!=='POST')return;open++;maxOpen=Math.max(maxOpen,open);return new Promise(r=>hold.push(()=>{open--;r(undefined)}))});
+ await flush();x.run("set('strips.0.color',1)");await flush();for(let v=2;v<=9;v++){x.run(`set('strips.0.color',${v})`);x.run(`set('strips.3.speed',${v})`);await flush();if(v%3===0)await x.tickIf(100)}
+ assert.equal(posts(x).length,1);hold.shift()();await flush();assert.equal(posts(x).length,2);
+ const next=posts(x).map(bodyOf);assert.deepEqual(next.slice(1).map(b=>[b.strip,b.patch]),[[0,{color:9}]]);
+ hold.shift()();await flush();assert.deepEqual(bodyOf(posts(x)[2]).patch,{speed:9});assert.equal(maxOpen,1);}
+// 3. Full apply mixed with patches keeps the freshest values; old responses do not roll back local edits.
+{let hold;const x=harness((url,o)=>{if(o.method==='POST'&&!hold)return new Promise(r=>hold=r)});await flush();
+ x.run("set('strips.0.color',5)");await flush();x.run("set('global.brightness',44);set('strips.1.brightness',7)");await flush();
+ hold(undefined);await flush();await x.tick(100);const last=posts(x).at(-1);assert.equal(last.url,'/api/apply');const cfg=bodyOf(last).config;
+ assert.equal(cfg.global.brightness,44);assert.equal(cfg.strips[1].brightness,7);assert.equal(cfg.strips[0].color,5);assert.equal(x.run('config.strips[0].color'),5);}
+// 4. Final change/pointerup: no extra request for an already sent value; while busy it waits and is sent next.
+{let hold=null;const x=harness((url,o)=>{if(o.method==='POST'&&hold!==null)return new Promise(r=>hold=r)});await flush();
+ x.run("set('strips.4.brightness',50)");await flush();await x.tick(100);const n=posts(x).length;x.run("set('strips.4.brightness',50)");await flush();assert.equal(posts(x).length,n);
+ hold=true;x.run("set('strips.4.brightness',60)");await flush();assert.equal(posts(x).length,n+1);x.run("set('strips.4.brightness',61)");x.run("set('strips.4.brightness',62)");await flush();
+ assert.equal(posts(x).length,n+1);const r=hold;hold=null;r(undefined);await flush();await x.tick(100);assert.equal(bodyOf(posts(x).at(-1)).patch.brightness,62);}
+// 5. Save while a preview is in flight, and edits made during Save stay unsaved.
+{let holdPreview=null,holdSave=null;const x=harness((url,o)=>{if(url==='/api/preview'&&holdPreview===true)return new Promise(r=>holdPreview=r);if(url==='/api/save'&&holdSave===true)return new Promise(r=>holdSave=r)});
+ await flush();holdPreview=true;x.run("set('strips.0.color',100)");await flush();x.run("set('strips.0.color',101)");
+ holdSave=true;const saving=x.element('save').onclick();await flush();x.run("set('strips.0.color',202)");
+ const p=holdPreview;holdPreview=null;p(undefined);await flush();
+ const seq=posts(x).map(c=>[c.url,c.url==='/api/preview'?bodyOf(c).patch.color:null]);assert.deepEqual(seq,[['/api/preview',100],['/api/preview',101],['/api/save',null]]);
+ const s1=holdSave;holdSave=null;s1(undefined);await saving;await flush();
+ assert.deepEqual(posts(x).slice(3).map(c=>[c.url,bodyOf(c).patch.color]),[['/api/preview',202]]);assert.equal(x.run('dirty'),true);
+ assert.notEqual(x.element('dirty').textContent,'Записано');assert.equal(x.run('config.strips[0].color'),202);}
+// 6. «Записано» only with savedRevision matching the saved revision.
+{const x=harness();await flush();x.run("set('strips.0.color',7)");await flush();await x.element('save').onclick();await flush();assert.equal(x.element('dirty').textContent,'Записано');
+ const lag=harness((url,o)=>url==='/api/save'?{ok:true,master:true,revision:20,savedRevision:15}:undefined);await flush();lag.run("set('strips.0.color',7)");await flush();await lag.element('save').onclick();
+ assert.notEqual(lag.element('dirty').textContent,'Записано');assert.match(lag.element('toast').textContent,/не подтверждена/);}
+// 7. Conflict / foreign editor: reconcile reads status and does not override a foreign lease.
+{let stage=0;const x=harness((url,o)=>{if(url==='/api/preview'&&stage===0){stage=1;return {status:409,body:{error:'Configuration changed or another editor is active; reload'}}}if(url==='/api/status'&&stage===1)return {...clone(state),previewActive:true,previewOwner:'other-tab'}});
+ await flush();x.run("set('strips.0.color',9)");await flush();assert.ok(x.run('previewError'));const m=x.calls.length;await x.element('save').onclick();
+ assert.deepEqual(x.calls.slice(m).map(c=>c.url),['/api/status']);assert.equal(x.run('dirty'),true);assert.match(x.element('toast').textContent,/другой редактор/);}
+// 8. Hidden tab: no lease renewal; on return a lost lease stops pending edits.
+{const x=harness((url,o)=>url==='/api/status'&&x.context.__expired?{...clone(state),previewActive:false}:undefined);await flush();
+ x.run("set('strips.0.color',3)");await flush();assert.equal(x.run('previewOpen'),true);x.run('document.hidden=true');x.emit('visibilitychange');
+ const n=x.calls.length;await x.tick(10000);assert.equal(x.calls.length,n);x.run("set('strips.0.color',4)");await flush();assert.equal(posts(x).length,1);
+ x.context.__expired=true;x.run('document.hidden=false');x.emit('visibilitychange');await flush();
+ assert.ok(x.run('previewError'));assert.equal(posts(x).length,1);assert.equal(x.run('dirty'),true);}
+// 9. Reboot observed (bootId change) stops the old chain; old edits are not shown as saved.
+{const x=harness();await flush();x.run("set('strips.0.color',3)");await flush();const stream=x.events.at(-1);
+ stream.listeners.status({data:JSON.stringify({...state,bootId:'boot-b',configRevision:1,savedRevision:1})});assert.ok(x.run('previewError'));
+ x.run("set('strips.0.color',4)");await flush();assert.equal(posts(x).length,1);assert.notEqual(x.element('dirty').textContent,'Записано');assert.equal(x.run('previewOpen'),false);}
+// 10. Master is untouched by preview and Save (no action request, state kept).
+{const x=harness();await flush();x.run("set('strips.0.color',3)");await flush();await x.element('save').onclick();
+ assert.equal(x.calls.filter(c=>c.url==='/api/action').length,0);assert.equal(x.run('state.master'),true);for(const c of posts(x))assert.equal('master' in bodyOf(c),false);}
+console.log('PASS: small preview/coalescing, explicit save, structural apply, concurrent edits, startup retry, token renewal, ambiguous-write stop, revision conflict, validation recovery, SSE, hidden tabs, fallback, migration, channel reason, live preview (continuous, slow reply, mixed apply, final value, save snapshot, savedRevision, conflict, hidden tab, reboot, master)');

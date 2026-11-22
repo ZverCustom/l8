@@ -29,41 +29,92 @@ const post=(path,data)=>api(path,{method:'POST',headers:{'Content-Type':'applica
 // A short patch changes only RAM. The editor owns a revisioned 60 s lease;
 // save commits that revision, and hidden/closed editors stop renewing it.
 const editorId=Math.random().toString(36).slice(2)+Date.now().toString(36);
-let serverRevision=0, previewOpen=false, previewFull=false, previewPatches=new Map(), previewTimer, previewChain=Promise.resolve(), previewError=null;
+let serverRevision=0, previewOpen=false, previewFull=false, previewPatches=new Map(), previewError=null, needFull=false;
+let previewInFlight=null, previewGate=false, previewTimer=null, deviceBoot=null;
+const PREVIEW_INTERVAL=100, sentValues=new Map();
+const clone=x=>JSON.parse(JSON.stringify(x));
+function pendingPreview(){return previewFull||previewPatches.size>0}
+// Live preview: at most one change request in flight and one send per interval.
+// While a request runs only the latest value per channel/field waits; nothing queues.
 function schedulePreview(path,value){
  const match=/^strips\.(\d)\.(color|brightness|speed)$/.exec(path);
- if(match){const i=+match[1];previewPatches.set(i,{...previewPatches.get(i),[match[2]]:value})}else previewFull=true;
- clearTimeout(previewTimer);previewTimer=setTimeout(()=>{if(!busy)flushPreview().catch(e=>toast(e.message,true))},100);
+ if(match){
+  const i=+match[1],waiting=previewPatches.get(i);
+  // change/pointerup repeating a value already sent adds no request
+  if(!previewFull&&!needFull&&sentValues.get(path)===value&&!(waiting&&match[2] in waiting))return;
+  previewPatches.set(i,{...waiting,[match[2]]:value});
+ }else previewFull=true;
+ if(needFull){previewFull=true;needFull=false}
+ pumpPreview();
 }
-function flushPreview(){
- const work=async()=>{
-  if(previewError)throw previewError;
-  const full=previewFull,patches=new Map(previewPatches),snapshot=JSON.parse(JSON.stringify(config));
-  if(!full&&!patches.size)return;
-  previewFull=false;previewPatches.clear();
+function pumpPreview(){
+ if(busy||previewError||previewInFlight||previewGate||document.hidden||!pendingPreview()){showDirty();return}
+ previewGate=true;previewTimer=setTimeout(()=>{previewGate=false;previewTimer=null;pumpPreview()},PREVIEW_INTERVAL);
+ const full=previewFull,patches=new Map(previewPatches);previewFull=false;previewPatches.clear();
+ sendJobs(full?[['apply',{config:clone(config)}]]:[...patches].map(([strip,patch])=>['preview',{strip,patch}])).catch(e=>toast(e.message,true));
+}
+// Sends preview/apply jobs in order on the current revision. An explicit 400 waits for
+// the next edit (as a full apply); anything else stops the chain until reconciled.
+function sendJobs(jobs){
+ const run=(async()=>{
   try{
-   const jobs=full?[['apply',{config:snapshot}]]:[...patches].map(([strip,patch])=>['preview',{strip,patch}]);
-   for(const [path,body] of jobs){const r=await post(path,{client:editorId,revision:serverRevision,...body});serverRevision=r.revision;previewOpen=true}
-   put('dirty','Предпросмотр · не сохранено');
-  }catch(e){if(e.status===400){previewFull=true}else previewError=e;throw e}
- };
- const result=previewChain.then(work);previewChain=result.catch(()=>{});return result;
+   for(const [path,body] of jobs){
+    const r=await post(path,{client:editorId,revision:serverRevision,...body});
+    serverRevision=r.revision;previewOpen=true;if(state){state.configRevision=r.revision;if('savedRevision' in r)state.savedRevision=r.savedRevision}
+    if(path==='preview')for(const [k,v] of Object.entries(body.patch))sentValues.set(`strips.${body.strip}.${k}`,v);else sentValues.clear();
+   }
+  }catch(e){if(e.status===400)needFull=true;else previewError=e;throw e}
+  finally{if(previewInFlight===run)previewInFlight=null;showDirty();if(!busy)pumpPreview()}
+ })();
+ previewInFlight=run;showDirty();return run;
+}
+async function settlePreview(){while(previewInFlight)await previewInFlight.catch(()=>{})}
+// Kept for callers that need every pending edit applied (no snapshot semantics).
+async function flushPreview(){await settlePreview();if(previewError)throw previewError;if(pendingPreview()){const full=previewFull,patches=new Map(previewPatches);previewFull=false;previewPatches.clear();await sendJobs(full?[['apply',{config:clone(config)}]]:[...patches].map(([strip,patch])=>['preview',{strip,patch}]))}}
+// After a lost reply, conflict or reboot the device state is read, never assumed.
+// A foreign preview is not overridden; our own edits are re-applied only by an
+// explicit Save as a full apply on the revision just read.
+async function reconcile(){
+ const st=await api('status');noteBoot(st);state=st;updateLive();
+ if(st.previewActive&&st.previewOwner&&st.previewOwner!==editorId){const e=Error('Настройки сейчас изменяет другой редактор');e.status=409;throw e}
+ serverRevision=st.configRevision;previewOpen=!!st.previewActive&&(!st.previewOwner||st.previewOwner===editorId);previewError=null;sentValues.clear();
+}
+function noteBoot(st){
+ if(!st||!st.bootId)return;
+ if(deviceBoot&&st.bootId!==deviceBoot){previewOpen=false;sentValues.clear();if(dirty||pendingPreview()||previewInFlight){previewError=Error('Контроллер перезагрузился — изменения не применены');toast(previewError.message,true)}}
+ deviceBoot=st.bootId;
+}
+function showDirty(){
+ let text='';
+ if(previewError)text='Не применено — нажмите «Сохранить» для сверки';
+ else if(previewInFlight)text='Отправляется…';
+ else if(dirty)text=pendingPreview()||needFull||!previewOpen?'Есть изменения':'Применено, не сохранено';
+ else if(state&&state.savedRevision!=null&&state.savedRevision===state.configRevision&&!state.previewActive)text='Записано';
+ put('dirty',text);if($('save'))$('save').disabled=busy||!dirty;
 }
 async function keepPreview(){
- try{if(previewOpen&&!busy&&!document.hidden&&!previewError){await previewChain;if(!busy&&previewOpen)await post('touch',{client:editorId,revision:serverRevision})}}catch(e){previewError=e;toast('Предпросмотр завершён: '+e.message,true)}
+ try{if(previewOpen&&!busy&&!document.hidden&&!previewError){await settlePreview();if(!busy&&previewOpen&&!previewError)await post('touch',{client:editorId,revision:serverRevision})}}catch(e){previewError=e;showDirty();toast('Предпросмотр завершён: '+e.message,true)}
  setTimeout(keepPreview,10000);
 }
+// Back from a hidden tab: check lease and boot before any pending edit is sent.
+async function resumeVisible(){
+ if(!(previewOpen||pendingPreview()))return;
+ try{const st=await api('status');noteBoot(st);state=st;updateLive();
+  if(previewOpen&&!(st.previewActive&&(!st.previewOwner||st.previewOwner===editorId))){previewOpen=false;previewError=Error('Предпросмотр завершился, пока вкладка была скрыта')}
+ }catch(e){previewError=e}
+ showDirty();pumpPreview();
+}
 async function discardPreview(){
- if(busy)return;busy=true;clearTimeout(previewTimer);
+ if(busy)return;busy=true;clearTimeout(previewTimer);previewGate=false;
  try{
- await previewChain;
+ previewFull=false;previewPatches.clear();await settlePreview();
  serverRevision=(await api('status')).configRevision;
  const r=await post('discard',{client:editorId,revision:serverRevision});serverRevision=r.revision;
- if(state)state.configRevision=serverRevision;previewOpen=false;previewFull=false;previewPatches.clear();previewError=null;clearTimeout(previewTimer);
+ if(state){state.configRevision=serverRevision;if('savedRevision' in r)state.savedRevision=r.savedRevision}previewOpen=false;previewFull=false;previewPatches.clear();previewError=null;needFull=false;sentValues.clear();
  await refreshConfig();
- }finally{busy=false}
+ }finally{busy=false;showDirty()}
 }
-function markDirty(){editRevision++;dirty=true;$('dirty').textContent='Есть изменения';$('save').disabled=busy}
+function markDirty(){editRevision++;dirty=true;showDirty()}
 function get(path){return path.split('.').reduce((v,k)=>v?.[k],config)}
 function set(path,value){const keys=path.split('.');const key=keys.pop();keys.reduce((v,k)=>v[k],config)[key]=value;markDirty();const output=document.querySelector('[data-value="'+path+'"]');if(output)output.textContent=value;schedulePreview(path,value)}
 function field(path,label,kind='number',options=null,min='',max='',step='1'){let value=get(path), control;const attrs=`data-path="${path}"`;
@@ -114,22 +165,33 @@ function updateLive(){if(!state)return;put('vbat',num(state.vbat)+' В');put('ig
  state.inputs.forEach((x,i)=>put('inputLive-'+i,`АЦП ${num(x.mv,0)} мВ · уровень ${num(x.value*100,0)}%`));
  for(const n of ['ax','ay','az','gx','gy','gz','temp','yaw'])put('imu-'+n,state.imu.ok?num(state.imu[n],n==='temp'?1:2):'—');
  put('canLive',state.canStatus+' · '+state.canBitrate);put('netLive',state.network);put('buildLive',`Версия ${state.firmware} · flash ${state.flash/1048576} МБ · PSRAM ${state.psram/1048576} МБ · свободно ${Math.round(state.heap/1024)} КиБ`)}
-async function refreshConfig(){config=await api('config');serverRevision=state?.configRevision??serverRevision;dirty=false;$('dirty').textContent='';$('save').disabled=true;render()}
+async function refreshConfig(){config=await api('config');serverRevision=state?.configRevision??serverRevision;dirty=false;render();showDirty()}
 async function act(action,extra={}){await post('action',{action,...extra});state=await api('status');updateLive()}
 $('save').onclick=async()=>{
  if(busy)return;
  const invalid=$('view').querySelector('input:invalid');if(invalid){invalid.reportValidity();return}
- const revision=editRevision;busy=true;$('save').disabled=true;$('save').textContent='Сохранение…';clearTimeout(previewTimer);
+ // Save covers the edits made before this click. Edits made while it runs stay
+ // pending/dirty and are previewed afterwards; they are never reported as written.
+ const revision=editRevision,clickConfig=clone(config),clickFull=previewFull||needFull,clickPatches=new Map(previewPatches);
+ busy=true;$('save').disabled=true;$('save').textContent='Сохранение…';clearTimeout(previewTimer);previewGate=false;previewFull=false;previewPatches.clear();needFull=false;
  try{
- if(previewError){serverRevision=(await api('status')).configRevision;previewError=null;previewFull=true}
- await flushPreview();
- const result=await post('save',{client:editorId,revision:serverRevision});serverRevision=result.revision;previewOpen=false;
- if(state){state.master=result.master;state.configRevision=serverRevision;updateLive()}
- if(editRevision===revision){dirty=false;$('dirty').textContent='';config.network.password='';config.network.keepPassword=true;
+ await settlePreview();
+ let full=clickFull;
+ if(previewError){await reconcile();full=true}
+ const jobs=full?[['apply',{config:clickConfig}]]:[...clickPatches].map(([strip,patch])=>['preview',{strip,patch}]);
+ if(jobs.length)await sendJobs(jobs);
+ if(!previewOpen){if(editRevision===revision)dirty=false;toast('Изменений для записи нет');return}
+ const result=await post('save',{client:editorId,revision:serverRevision});serverRevision=result.revision;previewOpen=false;sentValues.clear();
+ const confirmed=result.savedRevision!=null&&result.savedRevision===result.revision;
+ if(state){state.configRevision=result.revision;state.savedRevision=result.savedRevision??null;state.previewActive=false;updateLive()}
+ if(editRevision===revision&&!pendingPreview()){dirty=false;config.network.password='';config.network.keepPassword=true;
  const password=document.querySelector('[data-path="network.password"]');if(password)password.value='';
  const keep=document.querySelector('[data-path="network.keepPassword"]');if(keep)keep.checked=true}
- toast('Настройки записаны');
- }catch(e){if(e.status!==400)previewError=e;toast(e.message,true)}finally{busy=false;$('save').disabled=!dirty;$('save').textContent='Сохранить';if(previewFull||previewPatches.size)previewTimer=setTimeout(()=>flushPreview().catch(e=>toast(e.message,true)),100)}
+ toast(confirmed?'Настройки записаны':'Запись не подтверждена контроллером',!confirmed);
+ }catch(e){
+  // Nothing edited is dropped: the next attempt re-applies the whole local config.
+  needFull=true;if(e.status!==400&&e.status!==507)previewError=e;toast(e.message,true);
+ }finally{busy=false;$('save').textContent='Сохранить';showDirty();pumpPreview()}
 };
 $('master').onclick=async()=>{try{await act('master',{on:!state?.master})}catch(e){toast(e.message,true)}};
 document.addEventListener('input',e=>{const el=e.target,path=el.dataset.path;if(path&&(el.type==='color'||el.type==='range'))set(path,el.type==='color'?parseInt(el.value.slice(1),16):Number(el.value))});
@@ -152,17 +214,17 @@ function closeStatus(){if(statusEvents)statusEvents.close();statusEvents=null}
 function openStatus(){
  if(document.hidden||typeof EventSource==='undefined')return;
  closeStatus();statusEvents=new EventSource('/api/events?token='+encodeURIComponent(token));lastPush=Date.now();
- statusEvents.addEventListener('status',event=>{try{state=JSON.parse(event.data);lastPush=Date.now();$('dot').classList.add('online');put('connection','На связи');updateLive()}catch{closeStatus()}});
+ statusEvents.addEventListener('status',event=>{try{state=JSON.parse(event.data);lastPush=Date.now();$('dot').classList.add('online');put('connection','На связи');noteBoot(state);updateLive();showDirty()}catch{closeStatus()}});
  statusEvents.onerror=()=>{closeStatus();$('dot').classList.remove('online');put('connection','Восстанавливаем связь…')};
 }
 async function poll(){try{
  if(!busy&&!document.hidden&&(!statusEvents||Date.now()-lastPush>5000)){
-  closeStatus();token=(await api('session')).token;state=await api('status');$('dot').classList.add('online');put('connection','На связи');updateLive();openStatus();
+  closeStatus();token=(await api('session')).token;state=await api('status');noteBoot(state);$('dot').classList.add('online');put('connection','На связи');updateLive();showDirty();openStatus();
  }
  }catch(e){$('dot').classList.remove('online');put('connection','Нет связи — повторяем…')}finally{setTimeout(poll,5000)}}
-document.addEventListener('visibilitychange',()=>{if(document.hidden)closeStatus();else openStatus()});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)closeStatus();else{openStatus();resumeVisible()}});
 async function connect(){try{
- token=(await api('session')).token;state=await api('status');await refreshConfig();$('master').disabled=false;
+ token=(await api('session')).token;state=await api('status');noteBoot(state);await refreshConfig();$('master').disabled=false;
  $('dot').classList.add('online');put('connection','На связи');openStatus();setTimeout(poll,5000);keepPreview();
  }catch(e){$('dot').classList.remove('online');put('connection','Повторное подключение…');
  $('view').innerHTML=panel('Подключаемся к ZVER L8',`<p class="hint">${esc(e.message)}. Повторяем подключение автоматически…</p>`);
