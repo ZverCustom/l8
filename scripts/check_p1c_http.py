@@ -63,9 +63,12 @@ def slow_client_check(connect, token, boot, now=time.monotonic, sleep=time.sleep
     closed by the server (EOF/RST after draining), both fast clients stay open and keep
     delivering valid events, and the freed slot accepts a new subscription."""
     streams = []
+    def opened(rcvbuf):  # registered for cleanup the moment it exists
+        x = SseStream(connect(f'v=1&token={token}', rcvbuf)); streams.append(x); return x
     try:
-        slow = SseStream(connect(f'v=1&token={token}', 512)); streams.append(slow)
-        fast = [SseStream(connect(f'v=1&token={token}', None)) for _ in range(2)]; streams += fast
+        slow = opened(512)
+        fast = []
+        for _ in range(2): fast.append(opened(None))
         end = now() + accept
         while now() < end and not all(x.events or x.closed for x in streams):
             for x in streams: x.poll()
@@ -73,6 +76,8 @@ def slow_client_check(connect, token, boot, now=time.monotonic, sleep=time.sleep
         for x in streams:
             if b' 200 ' not in x.status() or not x.events or x.events[0] is None or x.events[0].get('bootId') != boot:
                 return False, 'subscription not accepted: ' + repr(x.status())
+            # A stream closed already while subscribing proves nothing about backpressure.
+            if x.closed: return False, 'stream closed during subscription (incomplete)'
         start = [len(f.events) for f in fast]; end = now() + hold
         while now() < end:  # read the fast clients only; the slow one exerts backpressure
             for f in fast:
@@ -89,7 +94,7 @@ def slow_client_check(connect, token, boot, now=time.monotonic, sleep=time.sleep
         for f in fast:
             f.poll()
             if f.closed: return False, 'fast client closed (incomplete)'
-        probe = SseStream(connect(f'token={token}', None)); streams.append(probe)
+        probe = SseStream(connect(f'token={token}', None)); streams.append(probe)  # noqa: registered at once
         end = now() + accept
         while now() < end and probe.head is None and not probe.closed: probe.poll(); sleep(0.2)
         if b' 200 ' not in probe.status(): return False, 'slot not freed: ' + repr(probe.status())

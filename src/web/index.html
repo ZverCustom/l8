@@ -20,12 +20,13 @@ async function request(path,options={}){
  }catch(e){if(e.name==='AbortError')throw Error('Контроллер не ответил за отведённое время');throw e}finally{clearTimeout(timer)}
 }
 function api(path,options={}){
+ // A guarded write is checked right before every transmission, including the retry
+ // after a token refresh: a session that ended meanwhile sends nothing more.
+ const send=()=>{if(options.guard&&!options.guard()){const e=Error('Отменено: контроллер перезагрузился');e.cancelled=true;throw e}return request(path,options)};
  const run=async()=>{
- // A guarded write is dropped if its session ended while it waited in the queue.
- if(options.guard&&!options.guard()){const e=Error('Отменено: контроллер перезагрузился');e.cancelled=true;throw e}
- try{return await request(path,options)}catch(e){
+ try{return await send()}catch(e){
  // Only an explicit rejection is safe to retry; never repeat a timed-out write.
- if(e.status!==403||path==='session')throw e;token=(await request('session')).token;return request(path,options)}};
+ if(e.cancelled||e.status!==403||path==='session')throw e;token=(await request('session')).token;return send()}};
  const result=apiQueue.then(run);apiQueue=result.catch(()=>{});return result;
 }
 const post=(path,data,guard)=>api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data),guard});

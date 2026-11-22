@@ -66,6 +66,9 @@ class FakeSock:
             if self.headed: raise BlockingIOError
             self.headed = True; return HEAD200
         if self.close_at is not None and t >= self.close_at: self.done = True; return b''
+        if self.kind == 'early_eof':
+            if self.headed: self.done = True; return b''
+            self.headed = True; return HEAD200 + EVENT()
         if self.kind == 'slow_dropped' and t >= self.drop_at:
             self.done = True; return b'data: {"partial"'   # buffered tail, then EOF on the next read
         out = b''
@@ -102,6 +105,20 @@ class SlowClient(unittest.TestCase):
         c = Clock()
         ok, why = run([FakeSock('slow_dropped', c, drop_at=5), FakeSock('fast', c), FakeSock('fast', c), FakeSock('probe_busy', c)], c)
         self.assertFalse(ok); self.assertIn('slot not freed', why)
+
+    def test_early_eof_during_subscription_is_not_pass(self):
+        c = Clock()  # review P1-007: 200 + first event, then immediate EOF before the hold
+        ok, why = run([FakeSock('early_eof', c), FakeSock('fast', c), FakeSock('fast', c), FakeSock('probe_ok', c)], c)
+        self.assertFalse(ok); self.assertIn('closed during subscription', why)
+
+    def test_partial_connect_closes_every_created_socket(self):
+        c = Clock(); made = [FakeSock('slow_alive', c), FakeSock('fast', c)]; queue = list(made)
+        def connect(q, rcv):
+            if not queue: raise OSError('connect failed')
+            return queue.pop(0)
+        with self.assertRaises(OSError):
+            slow_client_check(connect, 'tok', 'B', now=c.now, sleep=c.sleep)
+        self.assertTrue(all(x.closed_by_us for x in made))
 
     def test_slow_dropped_fast_alive_slot_free_passes(self):
         c = Clock(); socks = [FakeSock('slow_dropped', c, drop_at=5), FakeSock('fast', c), FakeSock('fast', c), FakeSock('probe_ok', c)]

@@ -171,4 +171,24 @@ const bodyOf=c=>JSON.parse(c.options.body);
  x.emit('change',{target:slider(30)});await flush();assert.equal(posts(x).length,n); // pointer released on the sent value: no request
  x.emit('input',{target:slider(31)});x.emit('change',{target:slider(32)});await flush();await x.tickIf(100);assert.equal(bodyOf(posts(x).at(-1)).patch.brightness,32);
  const color={dataset:{path:'strips.5.color'},type:'color',value:'#00ff00'};x.emit('input',{target:color});await flush();await x.tickIf(100);assert.equal(bodyOf(posts(x).at(-1)).patch.color,0x00ff00);}
-console.log('PASS: small preview/coalescing, explicit save, structural apply, concurrent edits, startup retry, token renewal, ambiguous-write stop, revision conflict, validation recovery, SSE, hidden tabs, fallback, migration, channel reason, live preview (continuous, slow reply, mixed apply, final value, save snapshot, savedRevision, conflict, hidden tab, reboot, master), review R5/R6, DOM input/change');
+// ---- P1-007 review: R6 path through the 403 token refresh ----
+// R6d: preview gets 403, the token refresh is delayed, a reboot is observed meanwhile: no second preview.
+{let holdSession=null,first=true;const x=harness((url,o)=>{
+  if(url==='/api/preview'&&first){first=false;return {status:403,body:{error:'Session expired'}}}
+  if(url==='/api/session'&&holdSession===true)return new Promise(r=>holdSession=r)});
+ await flush();holdSession=true;x.run("set('strips.0.color',9)");await flush();
+ assert.equal(posts(x).length,1);x.events.at(-1).listeners.status({data:JSON.stringify({...state,bootId:'boot-b',configRevision:1,savedRevision:1})});
+ const r=holdSession;holdSession=null;r({token:'new'});await flush();await x.tickIf(100);
+ assert.equal(posts(x).length,1);assert.equal(x.run('previewOpen'),false);assert.equal(x.run('dirty'),true);assert.ok(x.run('previewError'));}
+// R6e: Save's own save request gets 403 and the session changes during the refresh: save is not resent.
+{let holdSession=null,saveSeen=0;const x=harness((url,o)=>{
+  if(url==='/api/save'&&++saveSeen===1)return {status:403,body:{error:'Session expired'}};
+  if(url==='/api/session'&&holdSession===true)return new Promise(r=>holdSession=r)});
+ await flush();x.run("set('strips.0.color',9)");await flush();holdSession=true;const saving=x.element('save').onclick();await flush();
+ x.events.at(-1).listeners.status({data:JSON.stringify({...state,bootId:'boot-b',configRevision:1,savedRevision:1})});
+ const r=holdSession;holdSession=null;r({token:'new'});await saving;await flush();
+ assert.equal(saveSeen,1);assert.equal(x.run('dirty'),true);assert.notEqual(x.element('dirty').textContent,'Записано');}
+// R6f (control): without a reboot an explicit 403 is refreshed once and the write goes through.
+{let first=true;const x=harness((url,o)=>{if(url==='/api/preview'&&first){first=false;return {status:403,body:{error:'Session expired'}}}});
+ await flush();x.run("set('strips.0.color',9)");await flush();assert.equal(posts(x).length,2);assert.equal(x.run('previewOpen'),true);assert.ok(!x.run('previewError'));}
+console.log('PASS: small preview/coalescing, explicit save, structural apply, concurrent edits, startup retry, token renewal, ambiguous-write stop, revision conflict, validation recovery, SSE, hidden tabs, fallback, migration, channel reason, live preview (continuous, slow reply, mixed apply, final value, save snapshot, savedRevision, conflict, hidden tab, reboot, master), review R5/R6, DOM input/change, R6 token-refresh path');
