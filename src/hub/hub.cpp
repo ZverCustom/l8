@@ -1,3 +1,4 @@
+#include "l8_version.h"
 #include "hub.h"
 #include <WebServer.h>
 #include <lwip/sockets.h>

@@ -1,3 +1,4 @@
+#include "l8_version.h"
 #include "system.h"
 #include <LittleFS.h>
 #include <esp_system.h>
@@ -32,9 +33,6 @@ String sysUptime() {
     return String(buf);
 }
 
-#ifndef GIT_REV
-#define GIT_REV "unknown"
-#endif
 String sysBuildInfo() {
     return String(F(GIT_REV " " __DATE__ " " __TIME__));
 }

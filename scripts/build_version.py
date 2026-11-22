@@ -14,4 +14,4 @@ content = "#pragma once\n#define GIT_REV " + json.dumps(revision) + "\n#define L
 p = out / "l8_version.h"
 if not p.exists() or p.read_text() != content:
     p.write_text(content)
-env.Append(CPPPATH=[str(out)], CCFLAGS=["-include", str(p)])
+env.Append(CPPPATH=[str(out)])
