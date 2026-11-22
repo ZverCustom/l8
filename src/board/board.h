@@ -11,3 +11,5 @@ bool expRead(uint8_t reg, uint16_t& value);
 bool expSafeInit();
 void boardDataMask(uint8_t mask); // physical GPIO11..18 / PCA P00..P07 bits, not UI channel order
 uint8_t boardDataMask();
+
+void boardRouteLcd(uint8_t encodedMask);

@@ -30,6 +30,15 @@ extern "C" void IRAM_ATTR l8_rmt_route(int channel, int pin) {
     if (!on) gpio_set_level((gpio_num_t)pin, 0);
     portEXIT_CRITICAL_ISR(&routeMutex);
 }
+void boardRouteLcd(uint8_t encodedMask) {
+    portENTER_CRITICAL(&routeMutex);
+    for(int i=0;i<8;++i) {
+        bool on=(dataMask & encodedMask & (1u<<i));
+        gpio_matrix_out(LED_PIN_1+i,on?LCD_DATA_OUT0_IDX+i:SIG_GPIO_OUT_IDX,false,false);
+        if(!on) gpio_set_level((gpio_num_t)(LED_PIN_1+i),0);
+    }
+    portEXIT_CRITICAL(&routeMutex);
+}
 void boardBegin() {
     gpio_set_level((gpio_num_t)HOLD_PIN, 0);
     gpio_set_direction((gpio_num_t)HOLD_PIN, GPIO_MODE_INPUT_OUTPUT);

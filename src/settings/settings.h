@@ -13,7 +13,7 @@ struct DriveSettings {
     uint32_t shiftColor;
     int engineOff;        // when no data / rpm 0: 0 keep, 1 dim, 2 off
     int engineOffDim;     // brightness % used for engineOff == 1
-    int powerLimitMa;     // FastLED power cap at 12V, 0 = off
+    int powerLimitMa;     // measured aggregate current cap, 0 = off
     int lateralAxis;      // 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z
     int yawAxis;          // same encoding, gyro axis for yaw rate
     int maxSpeed;         // km/h full scale for speed source
@@ -37,6 +37,7 @@ struct InputSettings { int mode; float low, high, thresholdMv; };
 struct SavedData {
     bool autoStart;
     bool allowWithoutIgn; // strip power policy; never gates controller HOLD or peripherals
+    bool autoRetry;
     bool sensor5v;
     int bitrate;
     float channelMaxAmps[8];
@@ -59,13 +60,19 @@ extern DriveSettings& drive;
 
 void settingsBegin();       // mount FS, load file, push into live globals
 void settingsSave();        // live globals -> savedData, schedule write
-void settingsSaveNow();
+bool settingsSaveNow();
+bool settingsPreview(JsonVariantConst request, bool full, String& error);
+bool settingsCommitPreview(JsonVariantConst request, String& error);
+bool settingsTouchPreview(JsonVariantConst request, String& error);
+bool settingsDiscardPreview(JsonVariantConst request, String& error);
+bool settingsPreviewActive();
+uint32_t settingsRevision();
 void settingsTick();
 void settingsPresetSave(int i);
 bool settingsPresetLoad(int i);
 String settingsPresetName(int i);
 
-String settingsJson(bool secrets=false);
+String settingsJson(bool secrets=false, bool baseline=false);
 bool settingsApply(JsonVariantConst config, String& error);
 bool settingsHealthy();
 

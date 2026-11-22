@@ -85,13 +85,13 @@ void sysFlush() {
     size_t size=journal->copy(from,batch,16384);
     xSemaphoreGive(logMutex);
     if(!size) { free(batch); return; }
-    ledsPause();
+    ledsFlashPause();
     rotateIfNeeded();
     File f=LittleFS.open(LOG_PATH,"a");
     bool ok=bool(f);
     if(ok && lost!=reportedLost) f.printf("[RAM log overflow: %llu bytes lost]\n",lost);
     if(ok) { ok=f.write(reinterpret_cast<uint8_t*>(batch),size)==size; f.flush(); f.close(); }
-    ledsResume();
+    ledsFlashResume();
     if(ok) {
         xSemaphoreTake(logMutex,portMAX_DELAY);
         journal->acknowledge(from+size);
@@ -135,6 +135,6 @@ String sysLogTail(int maxBytes) {
 
 void sysClearLog() {
     if(journal) { xSemaphoreTake(logMutex,portMAX_DELAY); journal->clear(); xSemaphoreGive(logMutex); }
-    ledsPause(); LittleFS.remove(LOG_PATH); LittleFS.remove(LOG_OLD); ledsResume();
+    ledsFlashPause(); LittleFS.remove(LOG_PATH); LittleFS.remove(LOG_OLD); ledsFlashResume();
     reportedLost=0; sysLog(F("log cleared"));
 }

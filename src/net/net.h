@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 
-// STA to the saved network, own AP as fallback
+// AP primary; one boot discovery / explicit STA reconnect, no background scans
 extern String wifiSsid;
 extern String wifiPass;
 

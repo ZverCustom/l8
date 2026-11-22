@@ -1,8 +1,8 @@
 #pragma once
 #include <Arduino.h>
-struct ChannelPower { float amps=0, isVolts=0; bool on=false; uint8_t fault=0; uint32_t sampleAt=0; };
+struct ChannelPower { float brightnessScale=1; uint8_t retries=0; uint32_t retryInMs=0; bool retryPending=false; float amps=0, isVolts=0; bool on=false; uint8_t fault=0; uint32_t sampleAt=0; };
 struct PowerState {
-    float vbat=0, ledAmps=0, isVolts=0;
+    float vbat=0, ledAmps=0, isVolts=0, totalBrightnessScale=1;
     bool inhibited=false;
     bool ledPowerAllowed=false; // supply / IGN / inhibit / I2C; Master and channel faults are separate
     bool on=false, latched=false, ign=false, hold=false, ioOk=false, ioLatched=false;

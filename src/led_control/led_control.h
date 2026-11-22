@@ -16,6 +16,7 @@ struct CanSettings {
 // Define a structure for strip settings
 struct StripSettings {
     int mode;                // Mode 1: Non-RPM, Mode 2: RPM-based
+    int speed;               // per-strip virtual time rate, 0..100
     int animationIndex;      // Index to choose the animation
     uint32_t color;              // Single color for non-RPM animations
     int brightness;          // Brightness (0-100)
@@ -45,6 +46,10 @@ void requestLedReinit();       // ask the LED task to re-apply LED counts betwee
 void ledsPause();              // stop output, returns after the current frame is done
 void ledsResume();
 bool ledsPaused();
+bool ledsHealthy();
+const char* ledsBackend();
+void ledsFlashPause();
+void ledsFlashResume();
 bool ledsFrameShown();       // at least one (black) frame went out since boot
 
 // Different animation types for LED strips

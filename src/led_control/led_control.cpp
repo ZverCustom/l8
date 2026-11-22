@@ -7,6 +7,8 @@
 #include "board/board.h"
 #include <channel_map.h>
 #include <esp_heap_caps.h>
+#include <animation_time.h>
+#include "led_output/parallel_output.h"
 
 const int ledPins[NUM_STRIPS] = {v3::dataPin(0), v3::dataPin(1), v3::dataPin(2), v3::dataPin(3), v3::dataPin(4), v3::dataPin(5), v3::dataPin(6), v3::dataPin(7)};
 
@@ -20,14 +22,32 @@ extern OBD2 obd2;
 CRGB* leds[NUM_STRIPS];
 static CRGB* out[NUM_STRIPS];
 CLEDController* controllers[NUM_STRIPS] = {};
+static int outputCounts[NUM_STRIPS]={};
+static bool outputHealthy=false;
+bool ledsHealthy() { return outputHealthy; }
+const char* ledsBackend() {
+#ifdef L8_LED_LCD_DMA
+    return "lcd_cam_dma_experimental";
+#else
+    return "rmt";
+#endif
+}
+static bool showFrame(uint8_t brightness) {
+#ifdef L8_LED_LCD_DMA
+    const uint8_t* buffers[8];for(int i=0;i<8;++i)buffers[i]=reinterpret_cast<const uint8_t*>(out[i]);
+    if(!parallelShow(buffers,outputCounts,brightness)) { outputHealthy=false; powerInhibit(true); return false; }
+#else
+    FastLED.setBrightness(brightness); FastLED.show();
+#endif
+    return true;
+}
 
 // Per-strip animation state so strips don't share counters
 struct AnimState {
-    int pos = 0;
-    int dir = 1;
-    uint8_t phase = 0;
-    int bright = 0;
-    bool up = true;
+    l8anim::Clock clock;
+    l8anim::Meter meter, force;
+    double fireTick=0;
+    int effect=-1, count=0, source=-1;
     uint8_t* heat = nullptr;
 };
 static AnimState anim[NUM_STRIPS];
@@ -44,19 +64,25 @@ static const uint8_t colorOrderMap[6][3] = {
 void init(int index) {
     if (numLedsPerStrip[index] < MIN_LEDS) numLedsPerStrip[index] = MIN_LEDS;
     if (numLedsPerStrip[index] > MAX_LEDS) numLedsPerStrip[index] = MAX_LEDS;
+    outputCounts[index]=numLedsPerStrip[index];
     if (controllers[index]) controllers[index]->setLeds(out[index], numLedsPerStrip[index]);
     for (int i = numLedsPerStrip[index]; i < MAX_LEDS; i++) leds[index][i] = CRGB::Black;
 }
 
 void initializeLEDStrips() {
+#ifdef L8_LED_LCD_DMA
+    if(!parallelBegin()) { Serial.println("LCD DMA initialization failed; outputs inhibited"); return; }
+#endif
     FastLED.setDither(0);  // temporal dither shows as flicker at low frame rates
     for (int i = 0; i < NUM_STRIPS; i++) {
-        leds[i] = new CRGB[MAX_LEDS];
-        out[i] = new CRGB[MAX_LEDS];
+        leds[i] = static_cast<CRGB*>(heap_caps_malloc(sizeof(CRGB)*MAX_LEDS,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+        out[i] = static_cast<CRGB*>(heap_caps_malloc(sizeof(CRGB)*MAX_LEDS,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+        if(!leds[i] || !out[i]) { Serial.println("LED buffer allocation failed"); return; }
         fill_solid(leds[i], MAX_LEDS, CRGB::Black);
         fill_solid(out[i], MAX_LEDS, CRGB::Black);
 
         Serial.printf("Initializing strip %d with pin %d and %d LEDs\n", i + 1, ledPins[i], numLedsPerStrip[i]);
+#ifndef L8_LED_LCD_DMA
         switch (ledPins[i]) {
             case LED_PIN_1: controllers[i] = &FastLED.addLeds<WS2812B, LED_PIN_1, RGB>(out[i], numLedsPerStrip[i]); break;
             case LED_PIN_2: controllers[i] = &FastLED.addLeds<WS2812B, LED_PIN_2, RGB>(out[i], numLedsPerStrip[i]); break;
@@ -67,14 +93,10 @@ void initializeLEDStrips() {
             case LED_PIN_7: controllers[i] = &FastLED.addLeds<WS2812B, LED_PIN_7, RGB>(out[i], numLedsPerStrip[i]); break;
             case LED_PIN_8: controllers[i] = &FastLED.addLeds<WS2812B, LED_PIN_8, RGB>(out[i], numLedsPerStrip[i]); break;
         }
+#endif
         init(i);
     }
-}
-
-// Speed 0-100 -> frame interval in ms. Floor at ~60 fps so Wi-Fi and the hub get loop time:
-// pushing ~850 LEDs already takes ~25 ms per frame.
-static int frameInterval(int speed) {
-    return map(constrain(speed, 0, 100), 0, 100, 150, 16);
+    outputHealthy=true;
 }
 
 // Brightness 0-100 -> FastLED 0-255
@@ -86,90 +108,57 @@ void staticColor(int s) {
     fill_solid(leds[s], numLedsPerStrip[s], uintToCrgb(stripSettings[s].color));
 }
 
+static double phase(int s) { return anim[s].clock.ticks; }
+static float cycle(int s,float period) { return fmod(phase(s),double(period)); }
+static void dot(int s,float position,CRGB color) {
+    int n=numLedsPerStrip[s], first=int(floorf(position));
+    float fraction=position-first;
+    CRGB a=color,b=color; a.nscale8(uint8_t((1-fraction)*255)); b.nscale8(uint8_t(fraction*255));
+    leds[s][(first%n+n)%n]+=a; leds[s][((first+1)%n+n)%n]+=b;
+}
 void theaterChase(int s) {
-    int n = numLedsPerStrip[s];
-    CRGB color = uintToCrgb(stripSettings[s].color);
-    fill_solid(leds[s], n, CRGB::Black);
-    for (int i = anim[s].pos; i < n; i += 3) leds[s][i] = color;
-    anim[s].pos = (anim[s].pos + 1) % 3;
+    fill_solid(leds[s],numLedsPerStrip[s],CRGB::Black);
+    for(int i=0;i<numLedsPerStrip[s];i+=3) dot(s,i+cycle(s,3),uintToCrgb(stripSettings[s].color));
 }
-
 void snake(int s) {
-    int n = numLedsPerStrip[s];
-    CRGB color = uintToCrgb(stripSettings[s].color);
-    const int len = 20;
-    fill_solid(leds[s], n, CRGB::Black);
-    for (int i = 0; i < len; i++) leds[s][(anim[s].pos + i) % n] = color;
-    anim[s].pos = (anim[s].pos + 1) % n;
+    fill_solid(leds[s],numLedsPerStrip[s],CRGB::Black);
+    for(int i=0;i<min(20,numLedsPerStrip[s]);++i) dot(s,cycle(s,numLedsPerStrip[s])+i,uintToCrgb(stripSettings[s].color));
 }
-
 void colorWave(int s) {
-    int n = numLedsPerStrip[s];
-    const uint8_t waveLength = 20;
-    for (int i = 0; i < n; i++) {
-        leds[s][i] = CHSV(anim[s].phase + i * 255 / waveLength, 255, 255);
-    }
-    anim[s].phase += 5;
+    for(int i=0;i<numLedsPerStrip[s];++i) leds[s][i]=CHSV(uint8_t(uint32_t(phase(s)*5)+i*255/20),255,255);
 }
-
 void breathingLight(int s) {
-    int n = numLedsPerStrip[s];
-    AnimState& st = anim[s];
-    CRGB color = uintToCrgb(stripSettings[s].color);
-    st.bright += st.up ? 5 : -5;
-    if (st.bright >= 255) { st.bright = 255; st.up = false; }
-    if (st.bright <= 0)   { st.bright = 0;   st.up = true; }
-    for (int i = 0; i < n; i++) {
-        leds[s][i] = color;
-        leds[s][i].nscale8(st.bright);
-    }
+    CRGB color=uintToCrgb(stripSettings[s].color);
+    color.nscale8(uint8_t((1-cosf(cycle(s,102)*2*PI/102))*127.5f));
+    fill_solid(leds[s],numLedsPerStrip[s],color);
 }
-
 void rainbowCycle(int s) {
-    int n = numLedsPerStrip[s];
-    for (int i = 0; i < n; i++) {
-        leds[s][i] = CHSV(anim[s].phase + i * 256 / n, 255, 255);
-    }
-    anim[s].phase += 1 + can_setting.speed / 12;
+    int n=numLedsPerStrip[s];
+    for(int i=0;i<n;++i) leds[s][i]=CHSV(uint8_t(uint32_t(phase(s)*6)+i*256/n),255,255);
 }
-
 void meteorRain(int s) {
-    int n = numLedsPerStrip[s];
-    CRGB color = uintToCrgb(stripSettings[s].color);
-    fadeToBlackBy(leds[s], n, 64);
-    anim[s].pos %= n;
-    leds[s][anim[s].pos] = color;
-    anim[s].pos = (anim[s].pos + 1) % n;
+    int n=numLedsPerStrip[s]; float head=cycle(s,n);
+    for(int i=0;i<n;++i) { float distance=fmodf(head-i+n,n); leds[s][i]=uintToCrgb(stripSettings[s].color); leds[s][i].nscale8(uint8_t(255*expf(-distance/3.5f))); }
 }
-
-void twinkle(int s) {
-    int n = numLedsPerStrip[s];
-    fadeToBlackBy(leds[s], n, 50);
-    leds[s][random16(n)] = uintToCrgb(stripSettings[s].color);
-}
-
-void runningLights(int s) {
-    int n = numLedsPerStrip[s];
-    CRGB color = uintToCrgb(stripSettings[s].color);
-    for (int i = 0; i < n; i++) {
-        leds[s][i] = color;
-        leds[s][i].nscale8(sin8(anim[s].phase + i * 16));
+static uint32_t noiseHash(uint32_t x) { x^=x>>16; x*=0x7feb352d; x^=x>>15; x*=0x846ca68b; return x^(x>>16); }
+static void sparks(int s,bool multiColor) {
+    int n=numLedsPerStrip[s]; fill_solid(leds[s],n,CRGB::Black);
+    uint32_t tick=uint32_t(phase(s));
+    for(int age=0;age<40;++age) {
+        uint32_t seed=noiseHash((tick-age)^uint32_t(s*7919));
+        CRGB color=multiColor?CRGB(CHSV(seed>>16,200,255)):uintToCrgb(stripSettings[s].color);
+        color.nscale8(uint8_t(255*expf(-(age+float(phase(s)-tick))/(multiColor?15.f:4.f))));
+        leds[s][seed%n]+=color;
     }
-    anim[s].phase++;
 }
-
-// Bouncing dot with a trail
+void twinkle(int s) { sparks(s,false); }
+void confetti(int s) { sparks(s,true); }
+void runningLights(int s) {
+    for(int i=0;i<numLedsPerStrip[s];++i) { leds[s][i]=uintToCrgb(stripSettings[s].color); leds[s][i].nscale8(sin8(uint8_t(uint32_t(phase(s))+i*16))); }
+}
 void larsonScanner(int s) {
-    int n = numLedsPerStrip[s];
-    AnimState& st = anim[s];
-    CRGB color = uintToCrgb(stripSettings[s].color);
-    fadeToBlackBy(leds[s], n, 40);
-    if (st.pos >= n) st.pos = n - 1;
-    if (st.pos < 0) st.pos = 0;
-    leds[s][st.pos] = color;
-    st.pos += st.dir;
-    if (st.pos >= n - 1) { st.pos = n - 1; st.dir = -1; }
-    if (st.pos <= 0)     { st.pos = 0;     st.dir = 1; }
+    int n=numLedsPerStrip[s]; float t=cycle(s,2*(n-1)); float head=t<n?t:2*(n-1)-t;
+    for(int i=0;i<n;++i) { leds[s][i]=uintToCrgb(stripSettings[s].color); leds[s][i].nscale8(uint8_t(255*expf(-fabsf(head-i)/2.5f))); }
 }
 
 // Fire2012 by Mark Kriegsman
@@ -180,6 +169,9 @@ void fire(int s) {
     if (!heat) { fill_solid(leds[s], n, CRGB::Black); return; }
     const uint8_t cooling = 55;
     const uint8_t sparking = 120;
+    int steps=min(8,int(phase(s)-anim[s].fireTick));
+    anim[s].fireTick+=steps; if(phase(s)-anim[s].fireTick>8) anim[s].fireTick=phase(s);
+    for(int step=0;step<steps;++step) {
     for (int i = 0; i < n; i++) {
         heat[i] = qsub8(heat[i], random8(0, ((cooling * 10) / n) + 2));
     }
@@ -190,55 +182,33 @@ void fire(int s) {
         int y = random8(min(n, 7));
         heat[y] = qadd8(heat[y], random8(160, 255));
     }
+    }
     for (int j = 0; j < n; j++) leds[s][j] = HeatColor(heat[j]);
 }
 
-// Red / blue alternating halves
 void police(int s) {
-    int n = numLedsPerStrip[s];
-    int period = map(constrain(can_setting.speed, 0, 100), 0, 100, 500, 60);
-    bool phase = (millis() / period) & 1;
-    int half = n / 2;
-    fill_solid(leds[s], half, phase ? CRGB::Red : CRGB::Black);
-    fill_solid(leds[s] + half, n - half, phase ? CRGB::Black : CRGB::Blue);
+    int n=numLedsPerStrip[s], half=n/2;
+    bool on=uint32_t(phase(s)/4)&1;
+    fill_solid(leds[s],half,on?CRGB::Red:CRGB::Black);
+    fill_solid(leds[s]+half,n-half,on?CRGB::Black:CRGB::Blue);
 }
-
-void confetti(int s) {
-    int n = numLedsPerStrip[s];
-    fadeToBlackBy(leds[s], n, 10);
-    leds[s][random16(n)] += CHSV(anim[s].phase + random8(64), 200, 255);
-    anim[s].phase++;
-}
-
-// Fill with color from the start, then wipe back to black
 void colorWipe(int s) {
-    int n = numLedsPerStrip[s];
-    AnimState& st = anim[s];
-    CRGB color = uintToCrgb(stripSettings[s].color);
-    st.pos %= 2 * n;
-    if (st.pos < n) leds[s][st.pos] = color;
-    else            leds[s][st.pos - n] = CRGB::Black;
-    st.pos = (st.pos + 1) % (2 * n);
+    int n=numLedsPerStrip[s]; float head=cycle(s,2*n);
+    for(int i=0;i<n;++i) { float amount=constrain(head<n?head-i:i+1-(head-n),0.f,1.f); leds[s][i]=uintToCrgb(stripSettings[s].color); leds[s][i].nscale8(uint8_t(amount*255)); }
 }
-
-// Smooth pendulum dot
 void sinelon(int s) {
-    int n = numLedsPerStrip[s];
-    CRGB color = uintToCrgb(stripSettings[s].color);
-    fadeToBlackBy(leds[s], n, 20);
-    uint8_t bpm = map(constrain(can_setting.speed, 0, 100), 0, 100, 5, 60);
-    int p = beatsin16(bpm, 0, n - 1);
-    leds[s][p] += color;
+    int n=numLedsPerStrip[s]; float head=(1+sinf(cycle(s,64)*2*PI/64))*(n-1)/2;
+    for(int i=0;i<n;++i) { leds[s][i]=uintToCrgb(stripSettings[s].color); leds[s][i].nscale8(uint8_t(255*expf(-fabsf(head-i)/2))); }
 }
 
 // Whole strip coloured by lateral G: blue one way, red the other, brightness by magnitude
 void gForce(int s) {
     int n = numLedsPerStrip[s];
-    float g = drive.maxLateralG > 0 ? imuLateralG() / drive.maxLateralG : 0;
+    float g = anim[s].force.value;
     g = constrain(g, -1.0f, 1.0f);
     uint8_t v = (uint8_t)(fabsf(g) * 255);
     CRGB c = g < 0 ? CRGB(0, 0, 255) : CRGB(255, 0, 0);
-    c.nscale8(max(v, (uint8_t)8));
+    c.nscale8(v);
     fill_solid(leds[s], n, c);
 }
 
@@ -252,6 +222,8 @@ CRGB getColorForSection(int currentLED, int numLeds) {
 
 // Value of a scale source as fraction of full scale, signed for G / yaw
 static float scaleFraction(int source) {
+    if(source<=2 && !vehicleDataFresh()) return 0;
+    if((source==3 || source==4) && !imu.ok) return 0;
     switch (source) {
         case 1:  return drive.maxSpeed > 0 ? (float)vehicle.speed / drive.maxSpeed : 0;
         case 2:  return vehicle.throttle / 100.0f;
@@ -261,7 +233,7 @@ static float scaleFraction(int source) {
         default: {
             int span = can_setting.maxRPM - can_setting.minRPM;
             if (span <= 0) return 0;
-            return (float)((int)vehicle.rpm - can_setting.minRPM) / span;
+            return max(0.f,(float)((int)vehicle.rpm - can_setting.minRPM) / span);
         }
     }
 }
@@ -283,7 +255,7 @@ void rpmLevel(int s) {
     }
 
     fill_solid(leds[s], n, CRGB::Black);
-    float frac = scaleFraction(st.scaleSource);
+    float frac = anim[s].meter.value;
     bool signedSource = st.scaleSource == 3 || st.scaleSource == 4;
 
     if (st.bottom) {
@@ -309,12 +281,19 @@ void rpmLevel(int s) {
         int len = constrain((int)(fabsf(frac) * n), 0, n);
         for (int i = 0; i < len; i++) leds[s][i] = getColorForSection(i, n);
     }
+    float peak=anim[s].meter.peak;
+    if(fabsf(peak)>0.01f) {
+        int mid=constrain(st.center,0,n-1), half=max(mid,n-1-mid);
+        int distance=constrain(int(fabsf(peak)*(st.bottom?half:n))-1,0,n-1);
+        if(!st.bottom) leds[s][distance]=CRGB::White;
+        else { if((!signedSource || peak>=0) && mid+distance<n) leds[s][mid+distance]=CRGB::White; if((!signedSource || peak<0) && mid-distance>=0) leds[s][mid-distance]=CRGB::White; }
+    }
 }
 
 static void renderStrip(int i) {
     const StripSettings& st = stripSettings[i];
     if (st.animationIndex != 10 && anim[i].heat) { free(anim[i].heat); anim[i].heat = nullptr; }
-    bool useScale = (st.mode == 1) || (st.mode == 2 && scaleFraction(st.scaleSource) > 0.05f);
+    bool useScale = (st.mode == 1) || (st.mode == 2 && fabsf(anim[i].meter.value) > 0.05f);
     if (useScale) {
         rpmLevel(i);
         return;
@@ -349,7 +328,8 @@ static void transformStrip(int i) {
         fill_solid(dstBuf, n, CRGB::Black);
         return;
     }
-    uint8_t scale = mapBrightness(st.brightness);
+    auto power=powerSnapshot();
+    uint8_t scale = uint8_t(mapBrightness(st.brightness)*power.channels[i].brightnessScale*power.totalBrightnessScale);
     int order = constrain(st.colorOrder, 0, 5);
     const uint8_t* m = colorOrderMap[order];
     for (int k = 0; k < n; k++) {
@@ -374,11 +354,19 @@ void requestLedReinit() {
 }
 
 void runAnimations() {
-    static unsigned long lastFrame = 0;
-    static int lastPowerLimit = -1;
-    unsigned long now = millis();
-    if (now - lastFrame < (unsigned long)frameInterval(can_setting.speed)) return;
-    lastFrame = now;
+    if(!outputHealthy) return;
+    static uint32_t lastFrame = 0;
+    uint32_t now = micros();
+    if (uint32_t(now-lastFrame)<16667) return;
+    lastFrame=now;
+    for(int i=0;i<NUM_STRIPS;++i) {
+        auto& a=anim[i]; const auto& st=stripSettings[i];
+        if(a.effect!=st.animationIndex || a.count!=numLedsPerStrip[i]) { a.clock={}; a.fireTick=0; if(a.heat) memset(a.heat,0,MAX_LEDS); a.effect=st.animationIndex; a.count=numLedsPerStrip[i]; }
+        if(a.source!=st.scaleSource) { a.meter={}; a.source=st.scaleSource; }
+        float dt=a.clock.advance(millis(),st.speed);
+        a.meter.update(scaleFraction(st.scaleSource),dt,millis());
+        a.force.update(imu.ok && drive.maxLateralG>0?imuLateralG()/drive.maxLateralG:0,dt,millis());
+    }
 
     if (reinitPending) {
         reinitPending = false;
@@ -386,19 +374,14 @@ void runAnimations() {
         // the old frame length before shortening the controller's buffer.
         bool clearTail = false;
         for (int i = 0; i < NUM_STRIPS; i++) {
-            int previous = controllers[i]->size();
+            int previous = outputCounts[i];
             if (previous > numLedsPerStrip[i]) {
                 fill_solid(out[i] + numLedsPerStrip[i], previous - numLedsPerStrip[i], CRGB::Black);
                 clearTail = true;
             }
         }
-        if (clearTail) FastLED.show();
+        if (clearTail && !showFrame(mapBrightness(can_setting.brightess))) return;
         for (int i = 0; i < NUM_STRIPS; i++) init(i);
-    }
-
-    if (drive.powerLimitMa != lastPowerLimit) {
-        lastPowerLimit = drive.powerLimitMa;
-        FastLED.setMaxPowerInVoltsAndMilliamps(12, drive.powerLimitMa > 0 ? drive.powerLimitMa : 100000);
     }
 
     int brightness = can_setting.brightess;
@@ -422,8 +405,7 @@ void runAnimations() {
         renderStrip(i);
         transformStrip(i);
     }
-    FastLED.setBrightness(mapBrightness(brightness));
-    FastLED.show();
+    if(!showFrame(mapBrightness(brightness))) return;
     frameShown = true;
     powerSampleAdc();
 }
@@ -469,4 +451,16 @@ void startLedTask() {
     // core 1 alone: loop() runs on core 0 (ARDUINO_RUNNING_CORE), so nothing here delays the
     // RMT refill interrupt, which is allocated on this core at the first show()
     xTaskCreatePinnedToCore(ledTask, "leds", 6144, nullptr, 1, nullptr, 1);
+}
+
+// Enable only for cache-off qualification of the optional full-frame DMA backend.
+void ledsFlashPause() {
+#if !defined(L8_LED_LCD_DMA) || !defined(L8_DMA_FLASH_CONCURRENT)
+    ledsPause();
+#endif
+}
+void ledsFlashResume() {
+#if !defined(L8_LED_LCD_DMA) || !defined(L8_DMA_FLASH_CONCURRENT)
+    ledsResume();
+#endif
 }

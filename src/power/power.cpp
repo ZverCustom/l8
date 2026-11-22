@@ -5,7 +5,9 @@
 #include "vehicle/vehicle.h"
 #include <v3_safety.h>
 #include <driver/gpio.h>
+#include <current_control.h>
 struct Request {
+    float totalMaxAmps=0; bool autoRetry=true;
     bool master=false, allowWithoutIgn=false, sensor=false, inhibit=false, silent=true;
     bool enabled[8]={};
     float maxAmps[8]={}, calibration[8]={};
@@ -16,16 +18,17 @@ static PowerState state;
 PowerState power;
 static portMUX_TYPE stateMux=portMUX_INITIALIZER_UNLOCKED;
 static uint16_t resetMask=0;
-static PowerLatch latches[8];
+static l8power::Channel protection[8];
+static l8power::Dimmer totalDimmer;
 PowerState powerSnapshot() { portENTER_CRITICAL(&stateMux); auto s=state; portEXIT_CRITICAL(&stateMux); return s; }
 void powerInhibit(bool value) { portENTER_CRITICAL(&stateMux); request.inhibit=value; portEXIT_CRITICAL(&stateMux); if(value) boardDataMask(0); }
 void powerCanSilent(bool value) { portENTER_CRITICAL(&stateMux); request.silent=value; portEXIT_CRITICAL(&stateMux); }
 void powerResetLatch(int ch) { portENTER_CRITICAL(&stateMux); resetMask |= ch<0 ? 0x1ff : (ch<8 ? (1u<<ch) : 0); portEXIT_CRITICAL(&stateMux); }
 void powerSampleAdc() {}
-const char* powerFaultName(uint8_t v) { return v==1 ? "overcurrent" : v==2 ? "switch fault" : ""; }
+const char* powerFaultName(uint8_t v) { return v==1 ? "overcurrent" : v==2 ? "switch fault" : v==3 ? "current spike" : v==4 ? "invalid sample" : ""; }
 void powerTick() {
     Request next;
-    next.master=drive.masterOn;
+    next.master=drive.masterOn; next.autoRetry=savedData.autoRetry; next.totalMaxAmps=drive.powerLimitMa/1000.f;
     bool parked=savedData.cutPowerEngineOff && drive.engineOff==2 && !engineRunning();
     if(parked) next.master=false;
     next.allowWithoutIgn=savedData.allowWithoutIgn; next.sensor=savedData.sensor5v;
@@ -56,7 +59,7 @@ static void safetyTask(void*) {
         gpio_set_level((gpio_num_t)HOLD_PIN, s.hold);
         // Resets require Master OFF; restoring I2C never resumes loads automatically.
         if(reset && !cfg.master) {
-            for(int i=0;i<8;++i) if(reset&(1u<<i)) { s.channels[i].fault=0; latches[i].reset(); }
+            for(int i=0;i<8;++i) if(reset&(1u<<i)) { s.channels[i].fault=0; protection[i].reset(); }
             if(reset&0x100) { s.sensorFault=false; s.ioLatched=false; initOk=expSafeInit(); if(!initOk) s.ioLatched=true; }
         }
         if(!initOk && now-lastCheck>=500) { lastCheck=now; initOk=expSafeInit(); }
@@ -68,11 +71,13 @@ static void safetyTask(void*) {
         s.ledPowerAllowed=v3::ledsAllowed(s.vbat,s.ign,cfg.allowWithoutIgn,cfg.inhibit,initOk,s.ioLatched);
         uint8_t mask=0;
         for(int i=0;i<8;++i) {
-            bool on=s.ledPowerAllowed && cfg.master && cfg.enabled[i] && !s.channels[i].fault;
-            if(on && !s.channels[i].on) { enabledAt[i]=now; latches[i].reset(); }
+            bool permitted=s.ledPowerAllowed && cfg.master && cfg.enabled[i];
+            bool on=protection[i].ready(now,cfg.autoRetry,permitted) && permitted;
+            s.channels[i].fault=protection[i].fault;
+            if(on && !s.channels[i].on) { enabledAt[i]=now; protection[i].off(); }
             s.channels[i].on=on;
             if(on) mask|=v3::channelMask(i);
-            else { s.channels[i].amps=0; s.channels[i].isVolts=0; latches[i].reset(); }
+            else { s.channels[i].amps=0; s.channels[i].isVolts=0; protection[i].off(); }
         }
         // Disconnect before changing supply; newly enabled strips remain low for 3 ms.
         uint8_t data=mask;
@@ -94,15 +99,18 @@ static void safetyTask(void*) {
             delayMicroseconds(100);
             ch.isVolts=analogReadMilliVolts(LED_ISENSE_PIN)/1000.f;
             ch.amps=v3::currentAmps(ch.isVolts)*cfg.calibration[i]; ch.sampleAt=millis();
-            auto trip=latches[i].update(ch.sampleAt,ch.amps,ch.isVolts,cfg.maxAmps[i]);
-            if(trip!=PowerLatch::NONE) {
-                ch.fault=trip==PowerLatch::FAULT ? 2 : 1; ch.on=false;
+            protection[i].sample(ch.sampleAt,ch.amps,ch.isVolts,cfg.maxAmps[i],cfg.autoRetry);
+            if(protection[i].fault!=l8power::Channel::None) {
+                ch.fault=protection[i].fault; ch.on=false;
                 mask &= ~v3::channelMask(i); base &= ~v3::channelMask(i); boardDataMask(boardDataMask() & mask);
                 s.latched=true;
             }
             s.ledAmps+=ch.amps;
         }
         if(ok) ok=expWrite(2,base);
+        totalDimmer.update(now,s.ledAmps,cfg.totalMaxAmps);
+        s.totalBrightnessScale=totalDimmer.scale;
+        for(int i=0;i<8;++i) { auto& ch=s.channels[i]; const auto& c=protection[i]; ch.brightnessScale=c.dimmer.scale; ch.retries=c.retries; ch.retryPending=c.waiting; ch.retryInMs=c.remaining(now); }
         if(!ok) {
             boardDataMask(0); s.ioLatched=true; s.latched=true; initOk=false;
             s.ledPowerAllowed=false;
