@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-22",
+  "sourceCommit": "6780c131d85c6a1f95e15074effa74103b0605ee",
+  "sourceTreeCleanAtBuild": true,
+  "baseCommit": "aef5cb6",
+  "tests": {
+    "native": 42,
+    "native_settings": 8,
+    "pythonBuildVersion": 5,
+    "ui": "passed",
+    "linkedIdentity": "passed"
+  },
+  "builds": [
+    {
+      "environment": "l8_v3",
+      "version": "0.4.0+6780c13",
+      "bytes": 957136,
+      "sha256": "3f647ebc01291b6d2dedbb4214b1b1397e5ebbed77b5e310b5e9c25466277b3e",
+      "flashed": false
+    },
+    {
+      "environment": "l8_v3_dma",
+      "version": "0.4.0+6780c13",
+      "bytes": 950048,
+      "sha256": "c72b0fc93358ba0761b519a4d52b16d8255d5ce259ecb7c2aff173661ba715ef",
+      "flashed": false
+    },
+    {
+      "environment": "l8_v3_dma_flash",
+      "version": "0.4.0+6780c13",
+      "bytes": 950000,
+      "sha256": "282cd30d3033eb73dbc9085f51236aba36b6715312db7f4d69eb46ac5f453261",
+      "flashed": false
+    }
+  ],
+  "hardwareTested": false,
+  "pending": [
+    "20-30 Master cycles on longest strip with input capacitor",
+    "inrush at overload auto-retry",
+    "physical switch/spike protection timing",
+    "boot Wi-Fi retries and AP client arrival"
+  ],
+  "removed": [
+    "PowerLatch library and test_power",
+    "old PowerLatch test in v3_safety",
+    "HttpActivity and apHttpActive status field"
+  ]
+}
