@@ -30,6 +30,76 @@ def resolve_target(usb, base_url=None, use_ap=False, wait=300, now=time.monotoni
     return f"http://{st['ip']}", st['ip']
 
 
+class SseStream:
+    """Buffered reader over one SSE socket; never blocks longer than the given timeout."""
+    def __init__(self, sock):
+        self.sock, self.buf, self.head, self.closed, self.events = sock, b'', None, False, []
+
+    def poll(self):
+        """Read whatever is available now. Sets closed on EOF/RST."""
+        self.sock.setblocking(False)
+        try:
+            while True:
+                chunk = self.sock.recv(65536)
+                if not chunk: self.closed = True; break
+                self.buf += chunk
+        except (BlockingIOError, InterruptedError): pass
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError): self.closed = True
+        finally:
+            try: self.sock.setblocking(True)
+            except OSError: pass
+        if self.head is None and b'\r\n\r\n' in self.buf:
+            self.head, self.buf = self.buf.split(b'\r\n\r\n', 1)
+        while self.head is not None and b'data: ' in self.buf and b'\n\n' in self.buf.split(b'data: ', 1)[1]:
+            body, self.buf = self.buf.split(b'data: ', 1)[1].split(b'\n\n', 1)
+            try: self.events.append(json.loads(body))
+            except ValueError: self.events.append(None)
+
+    def status(self): return self.head.split(b'\r\n', 1)[0] if self.head else b''
+
+
+def slow_client_check(connect, token, boot, now=time.monotonic, sleep=time.sleep, hold=12.0, drain=4.0, accept=8.0):
+    """(ok, reason). PASS only if all three v1 subscriptions are accepted, the slow one is
+    closed by the server (EOF/RST after draining), both fast clients stay open and keep
+    delivering valid events, and the freed slot accepts a new subscription."""
+    streams = []
+    try:
+        slow = SseStream(connect(f'v=1&token={token}', 512)); streams.append(slow)
+        fast = [SseStream(connect(f'v=1&token={token}', None)) for _ in range(2)]; streams += fast
+        end = now() + accept
+        while now() < end and not all(x.events or x.closed for x in streams):
+            for x in streams: x.poll()
+            sleep(0.2)
+        for x in streams:
+            if b' 200 ' not in x.status() or not x.events or x.events[0] is None or x.events[0].get('bootId') != boot:
+                return False, 'subscription not accepted: ' + repr(x.status())
+        start = [len(f.events) for f in fast]; end = now() + hold
+        while now() < end:  # read the fast clients only; the slow one exerts backpressure
+            for f in fast:
+                f.poll()
+                if f.closed: return False, 'fast client lost during hold (incomplete, not a slow-client timeout)'
+            sleep(0.2)
+        gained = [len(f.events) - s for f, s in zip(fast, start)]
+        if min(gained) < max(2, int(hold / 0.5 / 3)) or any(e is None or e.get('bootId') != boot for f in fast for e in f.events):
+            return False, f'fast clients did not keep delivering valid events: {gained}'
+        end = now() + drain
+        while now() < end and not slow.closed:
+            slow.poll(); sleep(0.1)
+        if not slow.closed: return False, 'slow client still open after drain'
+        for f in fast:
+            f.poll()
+            if f.closed: return False, 'fast client closed (incomplete)'
+        probe = SseStream(connect(f'token={token}', None)); streams.append(probe)
+        end = now() + accept
+        while now() < end and probe.head is None and not probe.closed: probe.poll(); sleep(0.2)
+        if b' 200 ' not in probe.status(): return False, 'slot not freed: ' + repr(probe.status())
+        return True, f'slow dropped, fast events {gained}, slot freed'
+    finally:
+        for x in streams:
+            try: x.sock.close()
+            except OSError: pass
+
+
 def main():
     import serial
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -126,30 +196,11 @@ def main():
         c4 = sse(f'token={token}'); head = c4.recv(4096); c4.close()
         for c in conns: c.close()
         check('4th SSE client -> 503 (limit shared by v1/legacy)', b' 503 ' in head.split(b'\r\n', 1)[0])
-        # Slow client: a tiny receive window and no reads create real backpressure on the
-        # board's socket; the server must drop it (pending > 2 s) and free its slot.
-        time.sleep(3); slow = sse(f'v=1&token={token}', rcvbuf=512); fast = [sse(f'v=1&token={token}') for _ in range(2)]
-        deadline = time.monotonic() + 20; freed = False
-        while time.monotonic() < deadline and not freed:
-            for f in fast: f.setblocking(False)
-            for f in fast:
-                try:
-                    while f.recv(65536): pass
-                except (BlockingIOError, socket.timeout): pass
-            for f in fast: f.setblocking(True)
-            probe = sse(f'token={token}'); head = probe.recv(4096); probe.close()
-            freed = b' 200 ' in head.split(b'\r\n', 1)[0]
-            if not freed: time.sleep(2)
-        slow.setblocking(False); dropped = False
-        try:
-            while True:
-                chunk = slow.recv(65536)
-                if not chunk: dropped = True; break
-        except BlockingIOError: pass
-        except (ConnectionResetError, OSError): dropped = True
-        for c in fast + [slow]: c.close()
-        check('slow SSE client dropped under backpressure, slot freed', freed)
-        print('  slow socket observed closed by server:', dropped, flush=True)
+        # Slow client: a tiny receive window and no reads put backpressure on the board's
+        # socket; see slow_client_check for the exact PASS conditions.
+        time.sleep(3)
+        ok, why = slow_client_check(lambda q, rcv: sse(q, rcvbuf=rcv), token, boot)
+        print('  slow-client:', why, flush=True); check('slow SSE client dropped by server, fast clients kept, slot freed', ok)
         c = sse(f'v=1&token={token}'); a, = events(c, 1); c.close(); check('SSE reconnect after drops works', a['bootId'] == boot)
         print(f'{len(results)} checks passed')
     finally:

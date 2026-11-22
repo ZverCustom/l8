@@ -20,17 +20,20 @@ async function request(path,options={}){
  }catch(e){if(e.name==='AbortError')throw Error('Контроллер не ответил за отведённое время');throw e}finally{clearTimeout(timer)}
 }
 function api(path,options={}){
- const run=async()=>{try{return await request(path,options)}catch(e){
+ const run=async()=>{
+ // A guarded write is dropped if its session ended while it waited in the queue.
+ if(options.guard&&!options.guard()){const e=Error('Отменено: контроллер перезагрузился');e.cancelled=true;throw e}
+ try{return await request(path,options)}catch(e){
  // Only an explicit rejection is safe to retry; never repeat a timed-out write.
  if(e.status!==403||path==='session')throw e;token=(await request('session')).token;return request(path,options)}};
  const result=apiQueue.then(run);apiQueue=result.catch(()=>{});return result;
 }
-const post=(path,data)=>api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+const post=(path,data,guard)=>api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data),guard});
 // A short patch changes only RAM. The editor owns a revisioned 60 s lease;
 // save commits that revision, and hidden/closed editors stop renewing it.
 const editorId=Math.random().toString(36).slice(2)+Date.now().toString(36);
 let serverRevision=0, previewOpen=false, previewFull=false, previewPatches=new Map(), previewError=null, needFull=false;
-let previewInFlight=null, previewGate=false, previewTimer=null, deviceBoot=null;
+let previewInFlight=null, previewGate=false, previewTimer=null, deviceBoot=null, session=0;
 const PREVIEW_INTERVAL=100, sentValues=new Map();
 const clone=x=>JSON.parse(JSON.stringify(x));
 function pendingPreview(){return previewFull||previewPatches.size>0}
@@ -55,20 +58,26 @@ function pumpPreview(){
 }
 // Sends preview/apply jobs in order on the current revision. An explicit 400 waits for
 // the next edit (as a full apply); anything else stops the chain until reconciled.
+// `session` changes when a reboot is observed: work of an older session is not sent
+// any more, and its late replies never touch revision/previewOpen of the new one.
 function sendJobs(jobs){
+ const mine=session,current=()=>mine===session;
  const run=(async()=>{
   try{
    for(const [path,body] of jobs){
-    const r=await post(path,{client:editorId,revision:serverRevision,...body});
+    if(!current())return;
+    const r=await post(path,{client:editorId,revision:serverRevision,...body},current);
+    if(!current())return;
     serverRevision=r.revision;previewOpen=true;if(state){state.configRevision=r.revision;if('savedRevision' in r)state.savedRevision=r.savedRevision}
     if(path==='preview')for(const [k,v] of Object.entries(body.patch))sentValues.set(`strips.${body.strip}.${k}`,v);else sentValues.clear();
    }
-  }catch(e){if(e.status===400)needFull=true;else previewError=e;throw e}
+  }catch(e){if(!current()||e.cancelled)return;if(e.status===400)needFull=true;else previewError=e;throw e}
   finally{if(previewInFlight===run)previewInFlight=null;showDirty();if(!busy)pumpPreview()}
  })();
  previewInFlight=run;showDirty();return run;
 }
-async function settlePreview(){while(previewInFlight)await previewInFlight.catch(()=>{})}
+// Waits for the request in flight; reports whether it was refused (Save must not ignore that).
+async function settlePreview(){let failed=false;while(previewInFlight)await previewInFlight.catch(()=>{failed=true});return failed}
 // Kept for callers that need every pending edit applied (no snapshot semantics).
 async function flushPreview(){await settlePreview();if(previewError)throw previewError;if(pendingPreview()){const full=previewFull,patches=new Map(previewPatches);previewFull=false;previewPatches.clear();await sendJobs(full?[['apply',{config:clone(config)}]]:[...patches].map(([strip,patch])=>['preview',{strip,patch}]))}}
 // After a lost reply, conflict or reboot the device state is read, never assumed.
@@ -81,7 +90,7 @@ async function reconcile(){
 }
 function noteBoot(st){
  if(!st||!st.bootId)return;
- if(deviceBoot&&st.bootId!==deviceBoot){previewOpen=false;sentValues.clear();if(dirty||pendingPreview()||previewInFlight){previewError=Error('Контроллер перезагрузился — изменения не применены');toast(previewError.message,true)}}
+ if(deviceBoot&&st.bootId!==deviceBoot){session++;previewOpen=false;sentValues.clear();if(dirty||pendingPreview()||previewInFlight){previewError=Error('Контроллер перезагрузился — изменения не применены');toast(previewError.message,true)}}
  deviceBoot=st.bootId;
 }
 function showDirty(){
@@ -93,7 +102,7 @@ function showDirty(){
  put('dirty',text);if($('save'))$('save').disabled=busy||!dirty;
 }
 async function keepPreview(){
- try{if(previewOpen&&!busy&&!document.hidden&&!previewError){await settlePreview();if(!busy&&previewOpen&&!previewError)await post('touch',{client:editorId,revision:serverRevision})}}catch(e){previewError=e;showDirty();toast('Предпросмотр завершён: '+e.message,true)}
+ try{if(previewOpen&&!busy&&!document.hidden&&!previewError){await settlePreview();const mine=session;if(!busy&&previewOpen&&!previewError)await post('touch',{client:editorId,revision:serverRevision},()=>mine===session)}}catch(e){previewError=e;showDirty();toast('Предпросмотр завершён: '+e.message,true)}
  setTimeout(keepPreview,10000);
 }
 // Back from a hidden tab: check lease and boot before any pending edit is sent.
@@ -174,14 +183,22 @@ $('save').onclick=async()=>{
  // pending/dirty and are previewed afterwards; they are never reported as written.
  const revision=editRevision,clickConfig=clone(config),clickFull=previewFull||needFull,clickPatches=new Map(previewPatches);
  busy=true;$('save').disabled=true;$('save').textContent='Сохранение…';clearTimeout(previewTimer);previewGate=false;previewFull=false;previewPatches.clear();needFull=false;
+ const mine=session,current=()=>mine===session;
  try{
- await settlePreview();
- let full=clickFull;
- if(previewError){await reconcile();full=true}
+ // A refused or unknown in-flight request means the snapshot is not applied yet:
+ // re-apply the whole click-time config (or reconcile first) instead of saving old state.
+ const refused=await settlePreview();
+ // A reboot after the click cancels this Save; the edits stay local for an explicit retry.
+ if(!current())throw Error('Контроллер перезагрузился — запись отменена');
+ let full=clickFull||needFull||refused||(!previewOpen&&!clickPatches.size);needFull=false;
+ if(previewError){await reconcile();if(!current())throw Error('Контроллер перезагрузился — запись отменена');full=true}
  const jobs=full?[['apply',{config:clickConfig}]]:[...clickPatches].map(([strip,patch])=>['preview',{strip,patch}]);
  if(jobs.length)await sendJobs(jobs);
- if(!previewOpen){if(editRevision===revision)dirty=false;toast('Изменений для записи нет');return}
- const result=await post('save',{client:editorId,revision:serverRevision});serverRevision=result.revision;previewOpen=false;sentValues.clear();
+ if(!current())throw Error('Контроллер перезагрузился — запись отменена');
+ if(needFull||previewError||!previewOpen)throw previewError||Error('Изменения не применены контроллером — проверьте значения');
+ const result=await post('save',{client:editorId,revision:serverRevision},current);
+ if(!current())throw Error('Контроллер перезагрузился — запись не подтверждена');
+ serverRevision=result.revision;previewOpen=false;sentValues.clear();
  const confirmed=result.savedRevision!=null&&result.savedRevision===result.revision;
  if(state){state.configRevision=result.revision;state.savedRevision=result.savedRevision??null;state.previewActive=false;updateLive()}
  if(editRevision===revision&&!pendingPreview()){dirty=false;config.network.password='';config.network.keepPassword=true;

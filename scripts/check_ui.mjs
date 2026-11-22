@@ -124,4 +124,51 @@ const bodyOf=c=>JSON.parse(c.options.body);
 // 10. Master is untouched by preview and Save (no action request, state kept).
 {const x=harness();await flush();x.run("set('strips.0.color',3)");await flush();await x.element('save').onclick();
  assert.equal(x.calls.filter(c=>c.url==='/api/action').length,0);assert.equal(x.run('state.master'),true);for(const c of posts(x))assert.equal('master' in bodyOf(c),false);}
-console.log('PASS: small preview/coalescing, explicit save, structural apply, concurrent edits, startup retry, token renewal, ambiguous-write stop, revision conflict, validation recovery, SSE, hidden tabs, fallback, migration, channel reason, live preview (continuous, slow reply, mixed apply, final value, save snapshot, savedRevision, conflict, hidden tab, reboot, master)');
+// ---- P1-006 review: R5 (refused snapshot is not "saved"), R6 (reboot cancels the old batch), real DOM events ----
+// R5a: Save while a structural apply is in flight, apply refused with 400.
+{let hold;const x=harness((url,o)=>{if(url==='/api/apply'&&!hold)return new Promise(r=>hold=r)});await flush();
+ x.run("set('global.brightness',44)");await flush();const saving=x.element('save').onclick();await flush();
+ const before=posts(x).length;hold({status:400,body:{error:'Invalid global setting'}});await saving;await flush();
+ // Save re-applies the click snapshot as a full apply (accepted this time) and only then saves it.
+ const urls=posts(x).map(c=>c.url);assert.deepEqual(urls,['/api/apply','/api/apply','/api/save']);assert.equal(bodyOf(posts(x)[1]).config.global.brightness,44);}
+// R5b: same race, the device keeps refusing: nothing is declared written, dirty stays, Save stays possible.
+{let first;const x=harness((url,o)=>{if(url==='/api/apply'){if(!first)return new Promise(r=>first=r);return {status:400,body:{error:'Invalid global setting'}}}});await flush();
+ x.run("set('global.brightness',44)");await flush();const saving=x.element('save').onclick();await flush();first({status:400,body:{error:'Invalid global setting'}});await saving;await flush();
+ assert.equal(x.run('dirty'),true);assert.notEqual(x.element('dirty').textContent,'Записано');assert.equal(x.element('save').disabled,false);
+ assert.equal(posts(x).filter(c=>c.url==='/api/save').length,0);assert.equal(x.run('config.global.brightness'),44);assert.doesNotMatch(x.element('toast').textContent,/Изменений для записи нет/);
+}
+// R5b continued: after the user corrects the value it is applied and saved normally.
+{let refuse=true,first;const x=harness((url,o)=>{if(url==='/api/apply'&&refuse){if(!first)return new Promise(r=>first=r);return {status:400,body:{error:'bad'}}}});await flush();
+ x.run("set('global.brightness',44)");await flush();const saving=x.element('save').onclick();await flush();first({status:400,body:{error:'bad'}});await saving;await flush();
+ refuse=false;x.run("set('global.brightness',45)");await flush();await x.tickIf(100);await x.element('save').onclick();await flush();
+ assert.equal(x.run('dirty'),false);assert.equal(x.element('dirty').textContent,'Записано');const applied=posts(x).filter(c=>c.url==='/api/apply').map(c=>bodyOf(c).config.global.brightness);assert.equal(applied.at(-1),45);}
+// R5c: an older preview is open; the newer apply is refused while Save waits: the old preview must not be saved as the new snapshot.
+{let hold;const x=harness((url,o)=>{if(url==='/api/apply'){if(!hold)return new Promise(r=>hold=r);return {status:400,body:{error:'bad'}}}});await flush();
+ x.run("set('strips.0.color',7)");await flush();await x.tickIf(100);assert.equal(x.run('previewOpen'),true);
+ x.run("set('global.brightness',44)");await flush();const saving=x.element('save').onclick();await flush();hold({status:400,body:{error:'bad'}});await saving;await flush();
+ assert.equal(posts(x).filter(c=>c.url==='/api/save').length,0);assert.equal(x.run('dirty'),true);assert.notEqual(x.element('dirty').textContent,'Записано');}
+// R6a: reboot observed while a multi-channel batch waits for a reply: the rest is not sent, the late reply changes nothing.
+{const holds=[];const x=harness((url,o)=>{if(url==='/api/preview')return new Promise(r=>holds.push(r))});await flush();
+ x.run("set('strips.0.color',1)");await flush();x.run("set('strips.1.color',2);set('strips.2.color',3)");holds.shift()(undefined);await flush();await x.tickIf(100);
+ assert.equal(posts(x).length,2);assert.equal(bodyOf(posts(x)[1]).strip,1);const revBefore=x.run('serverRevision');
+ x.events.at(-1).listeners.status({data:JSON.stringify({...state,bootId:'boot-b',configRevision:1,savedRevision:1})});
+ holds.shift()({ok:true,master:true,revision:77,savedRevision:10});await flush();await x.tickIf(100);await x.tickIf(100);
+ assert.equal(posts(x).length,2);assert.equal(x.run('previewOpen'),false);assert.ok(x.run('previewError'));assert.notEqual(x.run('serverRevision'),77);assert.equal(x.run('serverRevision'),revBefore);
+ assert.equal(x.run('config.strips[2].color'),3);assert.equal(x.run('dirty'),true);}
+// R6b: Save already pressed when the reboot is observed: no save of the old session.
+{const holds=[];const x=harness((url,o)=>{if(url==='/api/preview')return new Promise(r=>holds.push(r))});await flush();
+ x.run("set('strips.0.color',1)");await flush();x.run("set('strips.1.color',2)");const saving=x.element('save').onclick();await flush();
+ x.events.at(-1).listeners.status({data:JSON.stringify({...state,bootId:'boot-b',configRevision:1,savedRevision:1})});
+ holds.shift()({ok:true,master:true,revision:55,savedRevision:10});await saving;await flush();
+ assert.deepEqual(posts(x).map(c=>c.url),['/api/preview']);assert.equal(x.run('dirty'),true);assert.notEqual(x.element('dirty').textContent,'Записано');}
+// R6c: without a reboot the same batch is applied to the end (latest values).
+{const x=harness();await flush();x.run("set('strips.0.color',1)");await flush();x.run("set('strips.1.color',2);set('strips.2.color',3)");await x.tickIf(100);
+ assert.deepEqual(posts(x).map(c=>bodyOf(c).strip),[0,1,2]);assert.ok(!x.run('previewError'));}
+// Real DOM handlers: range input events then the final change event deliver the final value once.
+{const x=harness();await flush();const slider=v=>({dataset:{path:'strips.5.brightness'},type:'range',value:String(v)});
+ for(const v of [10,20,30])x.emit('input',{target:slider(v)});await flush();await x.tickIf(100);
+ const n=posts(x).length;assert.deepEqual(posts(x).map(c=>bodyOf(c).patch.brightness),[10,30]);
+ x.emit('change',{target:slider(30)});await flush();assert.equal(posts(x).length,n); // pointer released on the sent value: no request
+ x.emit('input',{target:slider(31)});x.emit('change',{target:slider(32)});await flush();await x.tickIf(100);assert.equal(bodyOf(posts(x).at(-1)).patch.brightness,32);
+ const color={dataset:{path:'strips.5.color'},type:'color',value:'#00ff00'};x.emit('input',{target:color});await flush();await x.tickIf(100);assert.equal(bodyOf(posts(x).at(-1)).patch.color,0x00ff00);}
+console.log('PASS: small preview/coalescing, explicit save, structural apply, concurrent edits, startup retry, token renewal, ambiguous-write stop, revision conflict, validation recovery, SSE, hidden tabs, fallback, migration, channel reason, live preview (continuous, slow reply, mixed apply, final value, save snapshot, savedRevision, conflict, hidden tab, reboot, master), review R5/R6, DOM input/change');
