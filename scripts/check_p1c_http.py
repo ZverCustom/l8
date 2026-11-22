@@ -12,8 +12,10 @@ log, results = [], []
 def usb(o):
     s.write((json.dumps(o, separators=(',', ':')) + '\n').encode()); s.flush(); u = time.monotonic() + 12
     while time.monotonic() < u:
-        l = s.readline().decode(errors='replace').strip()
-        if l: log.append(l[:2000])
+        raw = s.readline()
+        while raw and not raw.endswith(b'\n') and time.monotonic() < u: raw += s.readline()  # readline() returns early on a pause
+        l = raw.decode(errors='replace').strip()
+        if l: log.append(l)
         if l.startswith('L8 {'): return json.loads(l[3:])
     raise TimeoutError(str(o))
 def check(n, v):

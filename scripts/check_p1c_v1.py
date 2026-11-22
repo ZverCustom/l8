@@ -15,8 +15,10 @@ log, results, skipped = [], [], []
 def send_raw(data: bytes, replies=1, timeout=12):
     s.write(data); s.flush(); out = []; until = time.monotonic() + timeout
     while len(out) < replies and time.monotonic() < until:
-        line = s.readline().decode(errors='replace').strip()
-        if line: log.append(line[:2000])
+        raw = s.readline()
+        while raw and not raw.endswith(b'\n') and time.monotonic() < until: raw += s.readline()  # readline() returns early on a pause
+        line = raw.decode(errors='replace').strip()
+        if line: log.append(line)
         if line.startswith('L8 {'): out.append(json.loads(line[3:]))
     if len(out) < replies: raise TimeoutError(data[:60])
     return out
