@@ -85,8 +85,8 @@ void actual_channel_protections_are_independent() {
     for(int i=0;i<8;++i){channels[i].sample(10,i==6?6:1,.3,5,true);channels[i].sample(110,i==6?6:1,.3,5,true);TEST_ASSERT_EQUAL(i==6?Channel::Overcurrent:Channel::None,channels[i].fault);}
     channels[6].reset();TEST_ASSERT_EQUAL(Channel::None,channels[6].fault);
 }
-void black_to_white_and_flashes_regulate_without_trip() {
-    for(int frameMs:{16,25,40}) for(int offset=0;offset<frameMs;++offset) for(float demand:{6.f,6.2f,7.f}) {
+void assert_flashes_regulate(float limit,float demand,uint32_t settledAt=200) {
+    for(int frameMs:{16,25,40}) for(int offset=0;offset<frameMs;++offset) {
         Channel c;c.enabled(0);float amps=.1f;
         for(uint32_t t=0;t<=1600;++t) {
             if((t+offset)%frameMs==0) {
@@ -94,13 +94,55 @@ void black_to_white_and_flashes_regulate_without_trip() {
                 amps=.1f+(white?(demand-.1f)*c.dimmer.scale:0);
             }
             if(t%5==0) {
-                c.sample(t,amps,amps*1200.f/5450.f,3,true);
+                c.sample(t,amps,amps*1200.f/5450.f,limit,true);
                 TEST_ASSERT_EQUAL(Channel::None,c.fault);TEST_ASSERT_EQUAL(0,c.retries);
-                if(t>=200 && t<800) TEST_ASSERT_LESS_THAN_FLOAT(3,amps);
+                if(t>=settledAt && t<800) TEST_ASSERT_LESS_THAN_FLOAT(limit,amps);
             }
         }
         TEST_ASSERT_GREATER_THAN_FLOAT(0,c.dimmer.scale);TEST_ASSERT_LESS_THAN_FLOAT(1,c.dimmer.scale);
     }
+}
+void black_to_white_and_flashes_regulate_without_trip() {
+    for(float demand:{6.f,6.2f,7.f}) assert_flashes_regulate(3,demand);
+}
+void flashes_above_switch_threshold_regulate_without_trip() {
+    // One frame first clears Switch, then normal feedback settles below limit.
+    // Assert no fault at EVERY sample through both deadlines, including settling.
+    for(float demand:{1.8f*5450.f/1200.f,10.f}) assert_flashes_regulate(5,demand,300);
+}
+void switch_window_flash_recovers() {
+    Channel c;c.enabled(0);
+    c.sample(10,1.8f*5450.f/1200.f,1.8,5,true);
+    TEST_ASSERT_EQUAL(Channel::None,c.fault);TEST_ASSERT_LESS_THAN_FLOAT(.7,c.dimmer.scale);
+    float reduced=c.dimmer.scale;
+    c.sample(49,1.8f*5450.f/1200.f,1.8,5,true);
+    TEST_ASSERT_FLOAT_WITHIN(.00001,reduced,c.dimmer.scale); // one reduction per window
+    c.sample(50,1.2f*5450.f/1200.f,1.2,5,true); // next frame clears Switch
+    TEST_ASSERT_FALSE(c.switchHigh);TEST_ASSERT_EQUAL(Channel::None,c.fault);
+    c.sample(90,4.5,.991,5,true);
+    c.sample(200,4.5,.991,5,true);
+    TEST_ASSERT_TRUE(c.ready(200,true,true));TEST_ASSERT_EQUAL(0,c.retries);
+}
+void persistent_switch_fault_still_latches_at_50ms() {
+    Channel c;uint32_t t=0xfffffff0u;c.enabled(t);
+    c.sample(t+9,14,3.1,5,true);TEST_ASSERT_EQUAL_FLOAT(1,c.dimmer.scale);
+    c.sample(t+10,14,3.1,5,true);float reduced=c.dimmer.scale;
+    TEST_ASSERT_LESS_THAN_FLOAT(1,reduced);
+    for(uint32_t dt=11;dt<60;++dt) {
+        c.sample(t+dt,14,3.1,5,true);TEST_ASSERT_EQUAL(Channel::None,c.fault);
+        TEST_ASSERT_FLOAT_WITHIN(.00001,reduced,c.dimmer.scale);
+    }
+    c.sample(t+60,14,3.1,5,true);TEST_ASSERT_EQUAL(Channel::Switch,c.fault);
+    TEST_ASSERT_FALSE(c.waiting);TEST_ASSERT_FALSE(c.ready(t+999999,true,true));
+}
+void switch_reduction_rearms_after_low_sample_and_enable() {
+    Channel c;c.enabled(0);c.sample(10,8.175,1.8,5,true);float first=c.dimmer.scale;
+    c.sample(20,4.5,.991,5,true);c.sample(30,8.175,1.8,5,true);
+    TEST_ASSERT_LESS_THAN_FLOAT(first,c.dimmer.scale);float second=c.dimmer.scale;
+    c.off();c.enabled(40);c.sample(49,8.175,1.8,5,true);
+    TEST_ASSERT_FLOAT_WITHIN(.00001,second,c.dimmer.scale);
+    c.sample(50,8.175,1.8,5,true);TEST_ASSERT_LESS_THAN_FLOAT(second,c.dimmer.scale);
+    TEST_ASSERT_EQUAL(Channel::None,c.fault);
 }
 void large_uncontrollable_load_uses_finite_overload_retries() {
     Channel c;uint32_t now=0;
@@ -116,4 +158,4 @@ void large_overload_respects_disabled_auto_retry() {
     Channel c;c.enabled(0);c.sample(10,6,1.32,3,false);c.sample(110,6,1.32,3,false);
     TEST_ASSERT_EQUAL(Channel::Overcurrent,c.fault);TEST_ASSERT_FALSE(c.waiting);TEST_ASSERT_FALSE(c.ready(999999,false,true));
 }
-int main(){ UNITY_BEGIN(); RUN_TEST(large_overload_respects_disabled_auto_retry); RUN_TEST(black_to_white_and_flashes_regulate_without_trip); RUN_TEST(large_uncontrollable_load_uses_finite_overload_retries); RUN_TEST(startup_and_every_retry_allow_inrush); RUN_TEST(switch_noise_resets_debounce_without_current_trip); RUN_TEST(startup_boundary_wrap_and_manual_cycles); RUN_TEST(actual_channel_protections_are_independent); RUN_TEST(dim_before_trip); RUN_TEST(measured_feedback_with_render_delay); RUN_TEST(finite_retries); RUN_TEST(hard_faults_do_not_retry); RUN_TEST(interlocks_and_wrap); RUN_TEST(healthy_budget_reset); RUN_TEST(resistive_load_falls_back_to_trip); return UNITY_END(); }
+int main(){ UNITY_BEGIN(); RUN_TEST(flashes_above_switch_threshold_regulate_without_trip); RUN_TEST(switch_window_flash_recovers); RUN_TEST(persistent_switch_fault_still_latches_at_50ms); RUN_TEST(switch_reduction_rearms_after_low_sample_and_enable); RUN_TEST(large_overload_respects_disabled_auto_retry); RUN_TEST(black_to_white_and_flashes_regulate_without_trip); RUN_TEST(large_uncontrollable_load_uses_finite_overload_retries); RUN_TEST(startup_and_every_retry_allow_inrush); RUN_TEST(switch_noise_resets_debounce_without_current_trip); RUN_TEST(startup_boundary_wrap_and_manual_cycles); RUN_TEST(actual_channel_protections_are_independent); RUN_TEST(dim_before_trip); RUN_TEST(measured_feedback_with_render_delay); RUN_TEST(finite_retries); RUN_TEST(hard_faults_do_not_retry); RUN_TEST(interlocks_and_wrap); RUN_TEST(healthy_budget_reset); RUN_TEST(resistive_load_falls_back_to_trip); return UNITY_END(); }

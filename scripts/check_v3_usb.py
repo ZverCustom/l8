@@ -6,6 +6,7 @@ from pathlib import Path
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--port',required=True)
 parser.add_argument('--report',type=Path)
+parser.add_argument('--schema',type=int,choices=(4,5),default=5)
 args=parser.parse_args()
 original=None
 s=serial.Serial();s.port=args.port;s.baudrate=115200;s.timeout=.25;s.write_timeout=8;s.dtr=False;s.rts=False;s.open()
@@ -29,7 +30,7 @@ try:
  check('healthy safe boot',state['ioOk'] and not state['ioFault'] and state['imu']['ok'] and state['otaConfirmed'] and not state['master'] and all(not c['on'] and not c['data'] for c in state['channels']))
  original=cmd({'cmd':'get_config'})
  check('safe configuration',not original['global']['autoStart'] and not original['global']['sensor5v'])
- check('schema 4 / eight strips / three inputs',original['schema']==4 and len(original['strips'])==8 and len(original['inputs'])==3)
+ check('schema '+str(args.schema)+' / eight strips / three inputs',original['schema']==args.schema and len(original['strips'])==8 and len(original['inputs'])==3)
  check('Wi-Fi password redacted',original['network']['password']=='' and original['network']['keepPassword'])
  for name,mutate in [
   ('wrong schema',lambda c:c.update(schema=2)),

@@ -54,10 +54,15 @@ struct Channel {
         if(poweringUp && now-enabledAt<INRUSH_MS) return;
         poweringUp=false;
         if(volts>=1.6f) {
-            // IS is a diagnostic signal here, not a current measurement. Do not
-            // feed a current regulator with a switch diagnostic voltage.
+            // High IS may be load current or a switch diagnostic. Give a bright
+            // frame one reduction while retaining the full 50 ms fault filter.
+            // 7.3 A is the nominal current at the 1.6 V boundary, not a measured
+            // fault current. Never repeatedly dim against the same pending frame.
             over=false; healthy=false;
-            if(!switchHigh) { switchHigh=true; switchAt=now; }
+            if(!switchHigh) {
+                switchHigh=true; switchAt=now;
+                dimmer.scale*=fminf(1.f,limit*.9f/7.3f);
+            }
             if(now-switchAt>=SWITCH_MS) trip(Switch,now,false);
             return;
         }
