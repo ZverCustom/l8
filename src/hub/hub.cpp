@@ -20,23 +20,28 @@
 #include <v3_safety.h>
 #include "l8_ui.h"
 #include "led_control/led_control.h"
+#include "protocol/protocol.h"
+#include <line_framer.h>
 class StreamWebServer: public WebServer {
 public:
     using WebServer::WebServer;
     WiFiClient detach() { auto client=_currentClient; _currentClient=WiFiClient(); _currentStatus=HC_NONE; _chunked=false; return client; }
 };
 static StreamWebServer server(80);
-struct StatusStream { WiFiClient client; String pending; size_t offset=0; uint32_t queuedAt=0; };
+struct StatusStream { WiFiClient client; String pending; size_t offset=0; uint32_t queuedAt=0; bool v1=false; };
+static uint32_t sseSeq=0;
 static StatusStream streams[3];
 static void streamTick() {
     static uint32_t lastStatus=0;
-    uint32_t now=millis(); bool due=now-lastStatus>=500; String payload;
+    uint32_t now=millis(); bool due=now-lastStatus>=500; String payload, payloadV1;
     for(auto& s:streams) {
         if(!s.client) continue;
         if(!s.client.connected() || (s.pending.length() && now-s.queuedAt>2000)) { s.client.stop(); s.pending=""; continue; }
         if(due && !s.pending.length()) {
-            if(!payload.length()) payload="event: status\ndata: "+hubStatusJson()+"\n\n";
-            s.pending=payload; s.offset=0; s.queuedAt=now;
+            // One snapshot per tick for each format; v1 carries seq/bootId/revisions around it.
+            if(s.v1) { if(!payloadV1.length()) payloadV1="event: status\ndata: "+l8proto::sseV1(++sseSeq)+"\n\n"; s.pending=payloadV1; }
+            else { if(!payload.length()) payload="event: status\ndata: "+hubStatusJson()+"\n\n"; s.pending=payload; }
+            s.offset=0; s.queuedAt=now;
         }
         if(!s.pending.length()) continue;
         // Bounded non-blocking writes: a slow phone cannot stall safety/config.
@@ -46,7 +51,8 @@ static void streamTick() {
     }
     if(due) lastStatus=now;
 }
-static String token, serialLine, deviceId, bootId;
+static String token, deviceId, bootId;
+static LineFramer usbFramer(l8proto::MAX_COMMAND_BYTES);
 static uint32_t rebootAt=0, reconnectAt=0;
 static bool updating=false, uploadOk=false;
 static String uploadError;
@@ -54,26 +60,25 @@ static bool bootConfirmed=false;
 static void syncHubInhibit() {
     powerInhibit(!ledsHealthy() || v3::hubInhibited(bootConfirmed,updating,uploadOk,rebootAt!=0));
 }
-// Single source for GET /api/info and USB {"cmd":"info"}. Capabilities list only
-// what this build implements; commands.v1/preview.v1/status.sse come with P1-C.
-String hubInfoJson() {
-    DynamicJsonDocument d(1536);
+// Single source for GET /api/info, USB/v1 info. Capabilities list only what this build implements.
+static void infoFill(JsonObject d) {
     d["product"]="ZVER L8"; d["hardware"]=3; d["deviceId"]=deviceId; d["bootId"]=bootId;
     d["firmware"]=L8_FW_VERSION; d["build"]=GIT_REV;
     auto protocol=d.createNestedObject("protocol"); protocol["major"]=1; protocol["minor"]=0;
     d["configSchema"]=L8_CONFIG_SCHEMA;
     auto transports=d.createNestedArray("transports"); transports.add("http"); transports.add("usb");
-    auto caps=d.createNestedArray("capabilities"); caps.add("info.v1"); caps.add("channel.reason"); caps.add("config.savedRevision"); caps.add("ota.http");
+    auto caps=d.createNestedArray("capabilities"); caps.add("info.v1"); caps.add("channel.reason"); caps.add("config.savedRevision"); caps.add("commands.v1"); caps.add("preview.v1"); caps.add("status.sse"); caps.add("ota.http");
     auto l=d.createNestedObject("limits");
-    l["channels"]=8; l["maxCommandBytes"]=L8_MAX_CONFIG_BYTES; l["maxConfigBytes"]=L8_MAX_CONFIG_BYTES;
+    l["channels"]=8; l["maxCommandBytes"]=l8proto::MAX_COMMAND_BYTES; l["maxConfigBytes"]=L8_MAX_CONFIG_BYTES;
     l["maxLedCount"]=MAX_LEDS; l["maxChannelAmps"]=L8_MAX_CHANNEL_AMPS; l["previewLeaseMs"]=L8_PREVIEW_LEASE_MS;
     l["previewIntervalMs"]=100; l["statusIntervalMs"]=500; l["maxSseClients"]=sizeof(streams)/sizeof(streams[0]);
-    String out; serializeJson(d,out); return out;
 }
-static void addSaved(JsonDocument& d) { uint32_t saved; if(settingsSavedRevision(saved)) d["savedRevision"]=saved; else d["savedRevision"]=nullptr; }
-String hubStatusJson() {
-    auto p=powerSnapshot(); DynamicJsonDocument d(8192);
-    d["configRevision"]=settingsRevision(); addSaved(d); d["bootId"]=bootId; d["previewActive"]=settingsPreviewActive(); d["build"]=GIT_REV; d["ledBackend"]=ledsBackend(); d["ledHealthy"]=ledsHealthy(); d["product"]="ZVER L8"; d["hardware"]=3; d["firmware"]=L8_FW_VERSION; d["uptimeMs"]=millis();
+String hubInfoJson() { return l8proto::infoJson(); }
+static void addSaved(JsonObject d) { uint32_t saved; if(settingsSavedRevision(saved)) d["savedRevision"]=saved; else d["savedRevision"]=nullptr; }
+static void statusFill(JsonObject d) {
+    auto p=powerSnapshot();
+    d["configRevision"]=settingsRevision(); addSaved(d); d["bootId"]=bootId; d["previewActive"]=settingsPreviewActive();
+    if(settingsPreviewActive()) d["previewOwner"]=settingsPreviewOwner(); else d["previewOwner"]=nullptr; d["previewRemainingMs"]=settingsPreviewRemainingMs(); d["build"]=GIT_REV; d["ledBackend"]=ledsBackend(); d["ledHealthy"]=ledsHealthy(); d["product"]="ZVER L8"; d["hardware"]=3; d["firmware"]=L8_FW_VERSION; d["uptimeMs"]=millis();
     d["master"]=drive.masterOn; d["vbat"]=p.vbat; d["ign"]=p.ign; d["hold"]=p.hold;
     d["allowWithoutIgn"]=savedData.allowWithoutIgn; d["ledPowerAllowed"]=p.ledPowerAllowed;
     d["ioOk"]=p.ioOk; d["ioFault"]=p.ioLatched; d["powerStatus"]=powerStatusString();
@@ -91,41 +96,31 @@ String hubStatusJson() {
     auto inputs=d.createNestedArray("inputs"); for(int i=0;i<3;++i) { auto x=inputs.createNestedObject(); x["mv"]=p.inputMv[i]; x["volts"]=p.inputMv[i]*.0053f; x["value"]=p.inputValue[i]; }
     auto m=d.createNestedObject("imu"); m["ok"]=imu.ok; m["ax"]=imu.ax; m["ay"]=imu.ay; m["az"]=imu.az; m["gx"]=imu.gx; m["gy"]=imu.gy; m["gz"]=imu.gz; m["temp"]=imu.temp; m["lateralG"]=imuLateralG(); m["yaw"]=imuYawRate();
     d["otaConfirmed"]=bootConfirmed;
-    String out; serializeJson(d,out); return out;
 }
-static bool action(JsonVariantConst j,String& error) {
-    const char* cmd=j["action"]|"";
-    if(settingsPreviewActive() && (!strcmp(cmd,"calibrate") || !strncmp(cmd,"preset_",7) || !strcmp(cmd,"reconnect"))) { error="Save or discard preview first"; return false; }
-    if(!strcmp(cmd,"master")) {
-        if(!j["on"].is<bool>()) { error="Expected on:boolean"; return false; }
-        bool on=j["on"]; auto p=powerSnapshot();
-        if(on && (!p.ioOk || p.ioLatched || updating)) { error="Power controller unavailable"; return false; }
-        drive.masterOn=on; powerTick(); return true;
-    }
-    if(!strcmp(cmd,"reset")) { if(drive.masterOn) { error="Turn Master off before reset"; return false; } if(!j["channel"].is<int>()||j["channel"].as<int>() < -1 || j["channel"].as<int>()>7) { error="Expected channel -1..7"; return false; } powerResetLatch(j["channel"]); return true; }
-    if(!strcmp(cmd,"calibrate")) { if(!imu.ok) { error="IMU unavailable"; return false; } imuCalibrate(); settingsSave(); return true; }
-    if(!strcmp(cmd,"reconnect")) { reconnectAt=millis()+500; return true; }
-    if(!strcmp(cmd,"reboot")) { drive.masterOn=false; powerTick(); powerInhibit(true); settingsSaveNow(); rebootAt=millis()+500; return true; }
-    if(!strcmp(cmd,"preset_save")||!strcmp(cmd,"preset_load")) {
-        if(!j["slot"].is<int>()||j["slot"].as<int>()<0||j["slot"].as<int>()>=NUM_PRESETS) { error="Expected slot 0..2"; return false; }
-        if(!strcmp(cmd,"preset_save")) settingsPresetSave(j["slot"]);
-        else if(!settingsPresetLoad(j["slot"])) { error="Empty preset"; return false; } return true;
-    }
-    error="Unknown action"; return false;
-}
-static bool apply(JsonVariantConst config,String& error) {
-    if(updating || settingsPreviewActive()) { error="OTA or preview in progress"; return false; }
-    int previousMode=canMode, previousBitrate=canBitrateSel;
-    if(!settingsApply(config,error)) return false;
-    // Both setters restart CAN. A mode change already uses the new bitrate.
-    if(canMode!=previousMode) vehicleSetMode(canMode);
-    else if(canBitrateSel!=previousBitrate) vehicleSetBitrate(canBitrateSel);
-    settingsSave(); return true;
-}
+String hubStatusJson() { return l8proto::statusJson(); }
 static void send(int code,const String& data) { server.sendHeader("Cache-Control","no-store"); server.send(code,"application/json",data); }
 static void error(int code,const String& text) { DynamicJsonDocument d(512); d["error"]=text; String out; serializeJson(d,out); send(code,out); }
 static bool authorized() { if(server.header("X-L8-Token")==token) return true; error(403,"Session expired; reload the page"); return false; }
-static bool body(DynamicJsonDocument& d) { if(server.arg("plain").length()>24000) { error(413,"Config is too large"); return false; } if(deserializeJson(d,server.arg("plain"))) { error(400,"Invalid JSON"); return false; } return true; }
+static bool otaBusy() { return updating || uploadOk || rebootAt!=0; }
+static bool powerReady() { auto p=powerSnapshot(); return p.ioOk && !p.ioLatched; }
+static void installProtocol() {
+    l8proto::Hooks h;
+    h.bootId=[]{ return bootId.c_str(); };
+    h.otaBusy=otaBusy; h.powerReady=powerReady;
+    h.masterChanged=[]{ powerTick(); };
+    h.resetLatch=[](int ch){ powerResetLatch(ch); };
+    h.imuOk=[]{ return imu.ok; };
+    h.calibrate=[]{ imuCalibrate(); };
+    h.reconnect=[]{ reconnectAt=millis()+500; };
+    h.reboot=[]{ powerTick(); powerInhibit(true); settingsSaveNow(); rebootAt=millis()+500; };
+    h.info=infoFill; h.status=statusFill;
+    l8proto::setHooks(h);
+}
+static void legacyRoute(const char* route) {
+    if(!authorized()) return;
+    const String& body=server.arg("plain"); int http=500;
+    String out=l8proto::legacyHttp(route,body.c_str(),body.length(),http); send(http,out);
+}
 static void upload() {
     auto& u=server.upload();
     if(u.status==UPLOAD_FILE_START) {
@@ -156,39 +151,31 @@ void setupHub() {
     char b[33]; snprintf(b,sizeof(b),"%08lx%08lx%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random()); bootId=b;
     char t[33]; snprintf(t,sizeof(t),"%08lx%08lx%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random(),(unsigned long)esp_random()); token=t;
     const char* headers[]={"X-L8-Token"}; server.collectHeaders(headers,1);
+    installProtocol();
     server.on("/",HTTP_GET,[] { server.sendHeader("Content-Encoding","gzip"); server.sendHeader("Cache-Control","no-cache"); server.send_P(200,"text/html",(const char*)L8_UI,L8_UI_SIZE); });
     server.on("/api/session",HTTP_GET,[] { send(200,"{\"token\":\""+token+"\"}"); });
     server.on("/api/status",HTTP_GET,[] { send(200,hubStatusJson()); });
     server.on("/api/info",HTTP_GET,[] { send(200,hubInfoJson()); });
     server.on("/api/events",HTTP_GET,[] {
         if(server.arg("token")!=token) { error(403,"Session expired"); return; }
+        bool v1=server.hasArg("v");
+        if(v1 && server.arg("v")!="1") { int http; send(400,l8proto::handleV1("{\"v\":0}",7,l8proto::Transport::Http,true,http)); return; }
         for(auto& s:streams) if(!s.client || !s.client.connected()) {
             s.client.stop(); s.client=server.detach(); s.client.setNoDelay(true);
             s.pending="HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\nX-Accel-Buffering: no\r\n\r\nretry: 3000\n\n";
-            s.offset=0; s.queuedAt=millis(); return;
+            s.offset=0; s.queuedAt=millis(); s.v1=v1; return;
         }
         error(503,"Three status viewers already connected");
     });
     server.on("/api/config",HTTP_GET,[] { bool backup=server.arg("backup")=="1"; if(backup&&!authorized()) return; send(200,settingsJson(backup,true)); });
-    server.on("/api/config",HTTP_POST,[] { if(!authorized()) return; DynamicJsonDocument d(24576); if(!body(d)) return; String e; if(!apply(d.as<JsonVariantConst>(),e)) { error(400,e); return; } send(200,String("{\"ok\":true,\"master\":")+(drive.masterOn?"true}":"false}")); });
-    for(const char* path:{"/api/preview","/api/apply","/api/save","/api/discard","/api/touch"}) {
-        String route(path);
-        server.on(path,HTTP_POST,[route] {
-            if(!authorized()) return;
-            if(updating) { error(409,"OTA in progress"); return; }
-            DynamicJsonDocument d(24576); if(!body(d)) return;
-            String e; int mode=canMode,rate=canBitrateSel; bool ok;
-            if(route=="/api/save") ok=settingsCommitPreview(d.as<JsonVariantConst>(),e);
-            else if(route=="/api/touch") ok=settingsTouchPreview(d.as<JsonVariantConst>(),e);
-            else if(route=="/api/discard") ok=settingsDiscardPreview(d.as<JsonVariantConst>(),e);
-            else ok=settingsPreview(d.as<JsonVariantConst>(),route=="/api/apply",e);
-            if(!ok) { error(e.startsWith("Configuration changed")?409:e.startsWith("Flash write")?507:400,e); return; }
-            if(mode!=canMode) vehicleSetMode(canMode); else if(rate!=canBitrateSel) vehicleSetBitrate(canBitrateSel);
-            DynamicJsonDocument r(256); r["ok"]=true; r["revision"]=settingsRevision(); addSaved(r); r["master"]=drive.masterOn;
-            String out; serializeJson(r,out); send(200,out);
-        });
-    }
-    server.on("/api/action",HTTP_POST,[] { if(!authorized()) return; DynamicJsonDocument d(1024); if(!body(d)) return; String e; if(!action(d.as<JsonVariantConst>(),e)) { error(400,e); return; } send(200,"{\"ok\":true}"); });
+    server.on("/api/config",HTTP_POST,[] { legacyRoute("/api/config"); });
+    for(const char* path:{"/api/preview","/api/apply","/api/save","/api/discard","/api/touch","/api/action"}) server.on(path,HTTP_POST,[path] { legacyRoute(path); });
+    // API v1. Every POST command needs the session token; GET /api/info stays public.
+    server.on("/api/command",HTTP_POST,[] {
+        const String& body=server.arg("plain"); int http=500;
+        String out=l8proto::handleV1(body.c_str(),body.length(),l8proto::Transport::Http,server.header("X-L8-Token")==token,http);
+        send(http,out);
+    });
     server.on("/api/log",HTTP_GET,[] { server.send(200,"text/plain",sysLogTail(16000)); });
     server.on("/api/can",HTTP_GET,[] { server.send(200,"text/plain",sniffTableString()); });
     server.on("/api/ota",HTTP_POST,[] {
@@ -202,34 +189,14 @@ void setupHub() {
     server.begin(); Serial.println("L8 configurator ready; USB JSON: info / status / get_config / set_config / action");
 }
 static void serialTick() {
-    static bool discardLine=false;
     int budget=2048;
     while(Serial.available() && budget--) {
-        char ch=Serial.read(); if(ch=='\r') continue;
-        if(discardLine) { if(ch=='\n') discardLine=false; continue; }
-        if(ch!='\n') { if(serialLine.length()<24000) serialLine+=ch; else { serialLine=""; discardLine=true; Serial.println("L8 {\"error\":\"line too long\"}"); } continue; }
-        if(!serialLine.length()) continue;
-        DynamicJsonDocument d(24576); String out;
-        if(deserializeJson(d,serialLine)) out="{\"error\":\"Invalid JSON\"}";
-        else {
-            const char* cmd=d["cmd"]|"";
-            if(!strcmp(cmd,"status")) out=hubStatusJson();
-            else if(!strcmp(cmd,"info")) out=hubInfoJson();
-            else if(!strcmp(cmd,"get_config")) out=settingsJson(false,true);
-            else {
-                String e; bool ok=false; int mode=canMode,rate=canBitrateSel;
-                if(!strcmp(cmd,"set_config")) ok=apply(d["config"],e);
-                else if(!strcmp(cmd,"action")) ok=action(d.as<JsonVariantConst>(),e);
-                else if(updating) e="OTA in progress";
-                else if(!strcmp(cmd,"preview") || !strcmp(cmd,"apply")) ok=settingsPreview(d.as<JsonVariantConst>(),!strcmp(cmd,"apply"),e);
-                else if(!strcmp(cmd,"save")) ok=settingsCommitPreview(d.as<JsonVariantConst>(),e);
-                else if(!strcmp(cmd,"discard")) ok=settingsDiscardPreview(d.as<JsonVariantConst>(),e);
-                else if(!strcmp(cmd,"touch")) ok=settingsTouchPreview(d.as<JsonVariantConst>(),e);
-                if(ok && strcmp(cmd,"set_config")) { if(mode!=canMode) vehicleSetMode(canMode); else if(rate!=canBitrateSel) vehicleSetBitrate(canBitrateSel); }
-                DynamicJsonDocument result(512); result["revision"]=settingsRevision(); addSaved(result); result["master"]=drive.masterOn; result["ok"]=ok; if(!ok) result["error"]=e.length()?e:"Unknown command"; serializeJson(result,out);
-            }
-        }
-        serialLine=""; Serial.println("L8 "+out);
+        auto event=usbFramer.feed(char(Serial.read()));
+        if(event==LineFramer::Overflow) Serial.println("L8 "+l8proto::usbOverflow());
+        if(event!=LineFramer::Line) continue;
+        const std::string& line=usbFramer.text();
+        String out=l8proto::handleUsbLine(line.data(),line.size());
+        usbFramer.release(); Serial.println("L8 "+out);
     }
 }
 void updateHub() {

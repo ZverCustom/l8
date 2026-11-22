@@ -4,6 +4,7 @@ Backs up get_config (password is redacted by firmware; keepPassword keeps it on 
 import argparse, copy, json, time
 from pathlib import Path
 import serial
+from usb_restore import restore
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--port', required=True)
 ap.add_argument('--log', type=Path)
@@ -58,14 +59,14 @@ try:
     boot = st['bootId']; st = reboot()
     check('after reboot: new bootId, saved, Master OFF', st['bootId'] != boot and saved(st) and not st['master'])
     check('saved change persisted', cmd({'cmd': 'get_config'})['strips'][0]['brightness'] == 13)
-    r = cmd({'cmd': 'set_config', 'config': original}); time.sleep(2.2)
-    check('restore original', r['ok'] and saved(status()))
+    ok, why = restore(cmd, original)
+    check('restore original (confirmed write and content)', ok)
     st = reboot()
     check('original restored after reboot', cmd({'cmd': 'get_config'}) == original and saved(st) and not st['master'])
     original = None
     print(f'{len(results)} checks passed')
 finally:
     if original is not None:
-        try: cmd({'cmd': 'set_config', 'config': original}); time.sleep(2.2); print('restored original after failure')
-        except Exception as e: print('RESTORE FAILED', e)
+        ok, why = restore(cmd, original)
+        print('restore after failure: CONFIRMED' if ok else f'restore after failure NOT confirmed: {why}')
     if args.log: args.log.write_text('\n'.join(log) + '\n')

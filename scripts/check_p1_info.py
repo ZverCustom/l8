@@ -29,7 +29,7 @@ try:
     check('bootId 32 hex', re.fullmatch(r'[0-9a-f]{32}', a['bootId']) is not None and a['bootId'] != '0' * 32)
     check('ids stable within boot', a['deviceId'] == b['deviceId'] and a['bootId'] == b['bootId'])
     check('protocol 1.0', a['protocol'] == {'major': 1, 'minor': 0})
-    check('capabilities only implemented', set(a['capabilities']) == {'info.v1', 'channel.reason', 'ota.http'})
+    check('capabilities only implemented', set(a['capabilities']) == {'info.v1', 'channel.reason', 'config.savedRevision', 'commands.v1', 'preview.v1', 'status.sse', 'ota.http'} and a['limits']['maxCommandBytes'] == 24576)
     l = a['limits']
     check('limits', l['channels'] == 8 and l['maxLedCount'] == 1000 and l['maxChannelAmps'] == 5 and l['previewLeaseMs'] == 60000
           and l['maxConfigBytes'] == 24000 and l['maxSseClients'] == 3 and l['statusIntervalMs'] == 500)

@@ -1,10 +1,11 @@
 # ZVER L8 JSON API v1 — проект контракта
 
-Редакция проекта: 23.11.2026. **API v1 целиком ещё не реализован.**
+Редакция проекта: 23.11.2026. API v1 реализован по P1-C; ползунки P1-D ещё нет.
 Промежуточная реализация P1-A (с `44b99ae`): `GET /api/info`, USB `{"cmd":"info"}`
 и `channels[i].reason` в legacy-status. P1-B: `savedRevision` и `bootId` в legacy-status,
 `savedRevision` в ответах legacy preview/apply/save/discard/touch (HTTP и USB),
-возможность `config.savedRevision`. Конверт команд, preview v1 и SSE v1 — P1-C.
+возможность `config.savedRevision`. P1-C: `POST /api/command`, USB v1, SSE `?v=1`,
+возможности `commands.v1`, `preview.v1`, `status.sse`; уточнения — раздел 7, «Реализация P1-C».
 Документ задаёт результат P1 из [плана приложения](development/app-plan.md).
 Изменения проекта обсуждаются в отчёте/ревью до публикации совместимого API v1.
 
@@ -41,11 +42,15 @@
 Значения модели/памяти/лимитов берутся из прошивки, capabilities перечисляют только
 реализованные функции. `info.v1` означает только наличие этого объекта обнаружения
 (`/api/info`, USB `info`) и **не означает** поддержку конверта команд v1 — для него
-отдельная возможность `commands.v1`. Сборка P1-A объявляет ровно
-`["info.v1", "channel.reason", "ota.http"]`, P1-B добавляет `config.savedRevision`; `commands.v1`, `config.savedRevision`,
-`preview.v1` и `status.sse` появятся вместе с соответствующими частями P1-B/P1-C.
-В P1-A `limits.maxCommandBytes` = 24000 (фактический предел текущих HTTP/USB-обработчиков);
-24576 вводится с конвертом v1. Прошивки до `44b99ae` возвращают 404 на `/api/info`.
+отдельная возможность `commands.v1`. История объявлений:
+
+| Сборка | capabilities | maxCommandBytes |
+|---|---|---|
+| P1-A (`44b99ae`) | `info.v1`, `channel.reason`, `ota.http` | 24000 |
+| P1-B (`fbf6e58`) | + `config.savedRevision` | 24000 |
+| P1-C | + `commands.v1`, `preview.v1`, `status.sse` | 24576 |
+
+Прошивки до `44b99ae` возвращают 404 на `/api/info`.
 
 - `deviceId` — стабильный непрозрачный ID платы, производный от заводского ID чипа;
   не меняется при обычной прошивке или очистке пользовательских настроек, не является паролем.
@@ -291,6 +296,75 @@ UI сначала переводит `reason`, а fault/retry/ограничен
 Чтения можно повторять. После потери ответа на изменение сверить bootId,
 revision, savedRevision и при необходимости effective-конфигурацию, затем принять
 явное решение. Повторное получение HTTP-токена не разрешает повторять неоднозначную запись.
+
+### Реализация P1-C
+
+**Разбор.** Сообщение сначала проверяется строго по RFC 8259: ключи только в двойных
+кавычках, без лишних запятых, комментариев, NaN/Infinity и сырых управляющих символов,
+ровно одно значение с необязательными пробелами вокруг. Хвост после значения — BAD_JSON.
+Вложенность больше 12 и исчерпание памяти разбора — FRAME_TOO_LARGE. Неразбираемое
+сообщение или корень не-объект: id=null (BAD_JSON / INVALID_ARGUMENT).
+
+**Конверт.** `v` — целое 1; `"1"`, 1.0, true, null, 2 — UNSUPPORTED_VERSION.
+`POST /api/command` принимает только v1: объект без `v` — UNSUPPORTED_VERSION.
+На USB объект без `v` идёт в legacy-путь. `id` и `client` — строки из печатаемых ASCII
+0x20–0x7E длиной 1–48 байт; NUL (в том числе `\u0000`), управляющие символы и не-ASCII
+отклоняются (INVALID_ARGUMENT). При неверном id ответ содержит id=null.
+`cmd` не строка — INVALID_ARGUMENT; неизвестная команда или action — UNKNOWN_COMMAND.
+
+**Чтения** (`info`, `status`, `get_config`) не требуют `bootId` и допускают лишние поля.
+`get_config.view` — строка `baseline` или `effective`; effective требует `client`.
+
+**Мутации** (`preview`, `apply`, `save`, `discard`, `touch`, `action`) проверяются
+до любого изменения состояния. Порядок: схема полей (неизвестное поле, тип, диапазон),
+`bootId` (нет или не строка — INVALID_ARGUMENT, не совпал — BOOT_CHANGED), занятость
+OTA/reboot (BUSY), затем владелец, аренда и revision.
+
+| Команда | Поля сверх v/id/cmd/bootId | Отказы |
+|---|---|---|
+| preview | client, revision, strip 0–7, patch — непустой объект из color/brightness/speed с целыми значениями в диапазоне | INVALID_ARGUMENT |
+| apply | client, revision, config — объект ≤ 24000 байт | FRAME_TOO_LARGE, INVALID_ARGUMENT |
+| save / discard / touch | client, revision | — |
+| action master | action, on — boolean | OUTPUT_BLOCKED, если контроллер питания не подтверждён |
+| action reset | action, channel — целое −1…7 | MASTER_MUST_BE_OFF |
+| action preset_save / preset_load | action, slot 0–2, client, revision | EDITOR_BUSY при любом активном preview; REVISION_CONFLICT; пустой слот — INVALID_ARGUMENT |
+| action calibrate | action, client, revision | как preset; IMU недоступен — BUSY |
+| action reconnect | action | EDITOR_BUSY при активном preview |
+| action reboot | action | MASTER_MUST_BE_OFF |
+
+Размер `apply.config` — длина его минифицированной сериализации (`measureJson`)
+не больше 24000 байт. Внутри config проверяются значения schema 5; неизвестные
+вложенные поля config игнорируются, строгая проверка полей — на уровне команды.
+
+**Редакторы.** Порядок: чужой preview — EDITOR_BUSY; save/touch без preview — PREVIEW_EXPIRED;
+устаревшая revision — REVISION_CONFLICT. Владелец, чья аренда истекла, на свою последнюю
+revision получает PREVIEW_EXPIRED, остальные — REVISION_CONFLICT. Discard без preview
+с актуальной revision — успешный no-op. Результат команд редактора и status содержат
+`previewActive`, `previewOwner` (null без preview), `previewRemainingMs`.
+Результат action — `{master}`.
+
+**OTA.** Занятость = идёт загрузка, загруженный образ ждёт перезапуска или назначен reboot.
+В это время все мутации, включая Master OFF и все legacy-пути, отвечают BUSY / 409.
+Выходы на время OTA уже принудительно выключены.
+
+**HTTP.** Каждая `POST /api/command`, включая чтения, требует действующий `X-L8-Token`
+(AUTH_REQUIRED / 403 с id запроса). Без токена остаются `GET /api/info`, `/api/status`,
+`/api/config` без backup. SSE `?v=1` — тот же токен в query. Неизвестное `v` для SSE —
+400 с конвертом UNSUPPORTED_VERSION. Три клиента общие для обоих форматов.
+`seq` растёт на каждый новый снимок v1.
+
+**Ужесточения legacy:**
+- USB-строки разбираются тем же строгим парсером. Неразбираемая строка получает конверт
+  v1 BAD_JSON (id=null) вместо `{"error":"Invalid JSON"}`.
+- Строка USB длиннее 24576 байт отбрасывается до newline, ответ — FRAME_TOO_LARGE.
+  Legacy-строка 24001–24576 байт получает прежний `{"error":"line too long"}`.
+- Legacy-мутации (USB set_config/action/preview…, HTTP `/api/config`, `/api/action`,
+  `/api/preview…`) отклоняются во время OTA/reboot. Раньше USB set_config/action и часть
+  действий HTTP не проверяли OTA.
+- Legacy reboot по-прежнему сам выключает Master: это не ослабление защиты.
+  Payload и HTTP-коды legacy-маршрутов не менялись.
+
+`powerStatus` в legacy-status — устаревшая общая сводка. Состояние канала определяет `reason`.
 
 ## 8. OTA и будущие транспорты
 

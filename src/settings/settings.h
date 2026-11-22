@@ -73,6 +73,12 @@ bool settingsPreviewActive();
 uint32_t settingsRevision();
 // Revision whose content is confirmed in flash; false (JSON null) when none is.
 bool settingsSavedRevision(uint32_t& value);
+// Outcome class of the last settingsApply/Preview/Commit/Touch/Discard call.
+enum class SettingsError:uint8_t { None, Invalid, Conflict, EditorBusy, PreviewExpired, Flash };
+SettingsError settingsLastError();
+const char* settingsPreviewOwner();
+uint32_t settingsPreviewRemainingMs();
+bool settingsValidId(JsonVariantConst value); // printable ASCII, 1..48 bytes, no NUL
 void settingsTick();
 void settingsPresetSave(int i);
 bool settingsPresetLoad(int i);

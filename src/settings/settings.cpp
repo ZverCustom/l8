@@ -10,7 +10,10 @@ static bool healthy=false, pending=false;
 static uint32_t requested=0;
 static String pendingJson;
 static SavedData previewBase;
-static String previewOwner;
+static String previewOwner, expiredOwner;
+static uint32_t expiredRevision=0;
+static SettingsError lastError=SettingsError::None;
+static bool failWith(SettingsError code,String& error,const char* text) { lastError=code; error=text; return false; }
 static uint32_t revision=0, previewTouched=0, previewBaseRevision=0;
 static bool previewActive=false;
 // savedRevision bookkeeping. "Content" is the canonical serialization of the RAM
@@ -113,7 +116,7 @@ static bool decodeStrip(JsonObjectConst o,StripSettings& s,int& count,int legacy
 bool settingsApply(JsonVariantConst value,String& error) {
     auto o=value.as<JsonObjectConst>(); auto g=o["global"].as<JsonObjectConst>();
     SavedData next=savedData;
-    auto fail=[&](const char* text) { error=text; return false; };
+    auto fail=[&](const char* text) { lastError=SettingsError::Invalid; error=text; return false; };
     if(!integer(o["schema"],3,5)) return fail("Expected config schema 3, 4 or 5");
     if(!decodeCan(g,next.can_setting)) return fail("Invalid global RPM/brightness/speed");
     for(auto key:{"autoStart","allowWithoutIgn","sensor5v","cutPowerEngineOff"}) if(!g[key].is<bool>()) return fail("Invalid global switch");
@@ -155,7 +158,7 @@ bool settingsApply(JsonVariantConst value,String& error) {
     ledsPause();
     next.drive.masterOn=drive.masterOn;
     savedData=next; pushLive(); if(resize) requestLedReinit(); powerTick(); ledsResume(); bumpRevision();
-    return true;
+    lastError=SettingsError::None; return true;
 }
 static bool readConfig(const char* path) {
     File file=LittleFS.open(path,"r"); if(!file||file.size()>L8_MAX_CONFIG_BYTES) return false;
@@ -167,7 +170,7 @@ static bool readConfig(const char* path) {
     return true;
 }
 void settingsBegin() {
-    pending=false; pendingJson=""; previewActive=false; previewOwner=""; revision=0;
+    pending=false; pendingJson=""; previewActive=false; previewOwner=""; expiredOwner=""; expiredRevision=0; revision=0;
     savedValid=false; mainValid=false; confirmedHash=pendingHash=0; confirmedRevision=pendingRevision=0;
     defaults(); pushLive();
     healthy=LittleFS.begin(true); // fresh board / v2 FS: config-v3 uses a separate file
@@ -224,17 +227,34 @@ static void restorePreview() {
 void settingsTick() {
     if(previewActive && millis()-previewTouched>=L8_PREVIEW_LEASE_MS) {
         int mode=canMode, rate=canBitrateSel;
+        expiredOwner=previewOwner; expiredRevision=revision; // lets that editor see PREVIEW_EXPIRED, not a conflict
         restorePreview();
         if(mode!=canMode) vehicleSetMode(canMode); else if(rate!=canBitrateSel) vehicleSetBitrate(canBitrateSel);
     }
     if(pending && millis()-requested>=1500) { requested=millis(); settingsSaveNow(); }
 }
 bool settingsPreviewActive() { return previewActive; }
+const char* settingsPreviewOwner() { return previewActive?previewOwner.c_str():""; }
+uint32_t settingsPreviewRemainingMs() { uint32_t used=millis()-previewTouched; return previewActive && used<L8_PREVIEW_LEASE_MS ? L8_PREVIEW_LEASE_MS-used : 0; }
+SettingsError settingsLastError() { return lastError; }
+bool settingsValidId(JsonVariantConst v) {
+    if(!v.is<JsonString>()) return false;
+    JsonString text=v.as<JsonString>(); size_t n=text.size();
+    if(n<1 || n>48 || strlen(text.c_str())!=n) return false; // embedded NUL would truncate as a C string
+    for(size_t i=0;i<n;++i) { char c=text.c_str()[i]; if(c<0x20 || c>0x7e) return false; }
+    return true;
+}
 uint32_t settingsRevision() { return revision; }
+// Order: identity, foreign preview, missing preview, stale revision. The legacy
+// message text is kept for all editor conflicts; the code tells them apart.
 static bool checkEditor(JsonVariantConst req,String& error,bool requireActive=false) {
-    const char* owner=req["client"]|"";
-    if(!*owner || strlen(owner)>48 || !req["revision"].is<uint32_t>()) { error="Invalid editor identity/revision"; return false; }
-    if(req["revision"].as<uint32_t>()!=revision || (previewActive && previewOwner!=owner) || (requireActive && !previewActive)) { error="Configuration changed or another editor is active; reload"; return false; }
+    static const char* changed="Configuration changed or another editor is active; reload";
+    if(!settingsValidId(req["client"]) || !req["revision"].is<uint32_t>()) return failWith(SettingsError::Invalid,error,"Invalid editor identity/revision");
+    const char* owner=req["client"]; uint32_t asked=req["revision"];
+    if(previewActive && previewOwner!=owner) return failWith(SettingsError::EditorBusy,error,changed);
+    bool expired=!previewActive && expiredOwner.length() && !(expiredOwner!=owner) && asked==expiredRevision;
+    if(requireActive && !previewActive) return failWith(SettingsError::PreviewExpired,error,changed);
+    if(asked!=revision) return failWith(expired?SettingsError::PreviewExpired:SettingsError::Conflict,error,changed);
     return true;
 }
 bool settingsPreview(JsonVariantConst req,bool full,String& error) {
@@ -242,20 +262,20 @@ bool settingsPreview(JsonVariantConst req,bool full,String& error) {
     DynamicJsonDocument candidate(24576);
     if(full) candidate.set(req["config"]);
     else {
-        if(!integer(req["strip"],0,7) || !req["patch"].is<JsonObjectConst>()) { error="Expected strip 0..7 and patch"; return false; }
+        if(!integer(req["strip"],0,7) || !req["patch"].is<JsonObjectConst>()) return failWith(SettingsError::Invalid,error,"Expected strip 0..7 and patch");
         deserializeJson(candidate,settingsJson());
         auto dest=candidate["strips"][req["strip"].as<int>()].as<JsonObject>();
         for(JsonPairConst item:req["patch"].as<JsonObjectConst>()) {
             String key=item.key().c_str();
-            if(key!="color" && key!="brightness" && key!="speed") { error="Preview patch accepts color, brightness and speed"; return false; }
+            if(key!="color" && key!="brightness" && key!="speed") return failWith(SettingsError::Invalid,error,"Preview patch accepts color, brightness and speed");
             dest[key]=item.value();
         }
     }
     pullLive(); SavedData before=savedData; uint32_t beforeRevision=revision; bool starting=!previewActive;
     if(starting) previewActive=true; // the new token belongs to the preview, not to saved content
     if(!settingsApply(candidate.as<JsonVariantConst>(),error)) { if(starting) previewActive=false; return false; }
-    if(starting) { previewBase=before; previewBaseRevision=beforeRevision; previewOwner=req["client"].as<const char*>(); }
-    previewTouched=millis(); return true;
+    if(starting) { previewBase=before; previewBaseRevision=beforeRevision; previewOwner=req["client"].as<const char*>(); expiredOwner=""; }
+    previewTouched=millis(); lastError=SettingsError::None; return true;
 }
 bool settingsCommitPreview(JsonVariantConst req,String& error) {
     if(!checkEditor(req,error,true)) return false;
@@ -267,16 +287,16 @@ bool settingsCommitPreview(JsonVariantConst req,String& error) {
     if(!settingsSaveNow()) {
         // The failed preview never replaces the earlier pending snapshot or its token.
         previewActive=true; pending=oldPending; pendingJson=oldJson; requested=oldRequested; pendingHash=oldHash; pendingRevision=oldPendingRevision;
-        revision=oldRevision; confirmedRevision=oldConfirmed; error="Flash write failed; preview remains unsaved"; return false;
+        revision=oldRevision; confirmedRevision=oldConfirmed; return failWith(SettingsError::Flash,error,"Flash write failed; preview remains unsaved");
     }
-    previewOwner=""; return true;
+    previewOwner=""; lastError=SettingsError::None; return true;
 }
 bool settingsTouchPreview(JsonVariantConst req,String& error) {
-    if(!checkEditor(req,error,true)) return false; previewTouched=millis(); return true;
+    if(!checkEditor(req,error,true)) return false; previewTouched=millis(); lastError=SettingsError::None; return true;
 }
 bool settingsDiscardPreview(JsonVariantConst req,String& error) {
     if(!checkEditor(req,error)) return false;
-    restorePreview(); return true;
+    restorePreview(); lastError=SettingsError::None; return true;
 }
 void settingsPresetSave(int i) {
     if(i<0||i>=NUM_PRESETS) return; auto& p=savedData.presets[i]; p.used=true;
