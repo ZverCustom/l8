@@ -129,7 +129,8 @@ def restore(sy, iface, return_ssid, gw0, ap_ssid, ap_known_before, log):
         back = attempt('wait-original-after-power-cycle', lambda: bool(wait_for(sy, lambda: original_back(sy, iface, gw0), 90)))
     if not ap_known_before:
         attempt('forget-ap', lambda: sy.run(['networksetup', '-removepreferredwirelessnetwork', iface, ap_ssid], timeout=20))
-        listed = attempt('verify-forget', lambda: preferred(sy, iface))
+        listed = preferred(sy, iface)  # not logged: the list names the user's networks
+        log('verify-forget', listed=listed is not None)
         result['apForgotten'] = listed is not None and ap_ssid not in listed
     else:
         result['apForgotten'] = 'not needed (known before)'

@@ -49,6 +49,7 @@ async function main() {
   const up = await waitFor("typeof config==='object'&&config&&document.getElementById('connection').textContent==='На связи'", 30000);
   const sse = await waitFor("!!statusEvents&&statusEvents.readyState===1", 15000);
   check('page, config and SSE load over AP without internet', up && sse, {sse});
+  if (!up) throw Error('page did not load; remaining browser scenarios not run');
   const masterBefore = await evaluate('state.master');
   await evaluate("strip=0;page=1;render();true");
   const slider = "document.querySelector('[data-path=\"strips.0.brightness\"]')";
