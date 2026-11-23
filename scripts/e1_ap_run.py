@@ -11,7 +11,10 @@ chat while the computer has no internet.
      Python can import pyserial;
   2. join the board AP (SSID/password from src/config/config.h, never logged);
   3. wait for a 192.168.4.x address;
-  4. run scripts/check_p1c_http.py --ap under a hard time budget;
+  4. run scripts/check_p1c_http.py --ap under a hard time budget, then (--browser)
+     scripts/e1_browser.mjs: headless Chrome drives the real web UI on the AP. The UI part
+     saves settings, so the configuration is backed up over USB before the switch and
+     restored over USB (confirmed) before the network is returned;
   5. restore, every step bounded and isolated (one failing/hanging step does not stop
      the others): rejoin --return-ssid; if the ORIGINAL gateway is not back on the
      interface (an AP route on the same interface does not count), power-cycle Wi-Fi
@@ -50,6 +53,23 @@ class System:
             except OSError as e: return f'error: {e}'
     def now(self): return time.monotonic()
     def sleep(self, s): time.sleep(s)
+    def hold_port(self, port):
+        # Opening this board's USB port restarts it (and its AP). Open it once before the
+        # AP switch and keep it open, so later opens by the children do not reset it.
+        import serial
+        s = serial.Serial(); s.port = port; s.baudrate = 115200; s.dtr = False; s.rts = False; s.timeout = .2; s.open(); return s
+    def usb_status(self, handle):
+        handle.reset_input_buffer(); handle.write(b'{"cmd":"status"}\n'); handle.flush()
+        end = time.monotonic() + 8; raw = b''
+        while time.monotonic() < end:
+            raw += handle.readline()
+            if raw.endswith(b'\n'):
+                line = raw.decode(errors='replace').strip(); raw = b''
+                if line.startswith('L8 {'): return json.loads(line[3:])
+        return None
+    def release_port(self, handle):
+        try: handle.close()
+        except Exception: pass
 
 
 def ap_credentials():
@@ -127,6 +147,9 @@ def main(argv=None, sy=None, out_dir=None):
     ap.add_argument('--budget', type=int, default=900)
     ap.add_argument('--python', default=str(DEFAULT_PYTHON if DEFAULT_PYTHON.exists() else sys.executable))
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--browser', action='store_true', help='also run e1_browser.mjs (needs node and Google Chrome)')
+    ap.add_argument('--node', default='node')
+    ap.add_argument('--browser-budget', type=int, default=300)
     args = ap.parse_args(argv)
     os.umask(0o077)
     stamp = time.strftime('%Y-%m-%d-%H%M%S')
@@ -143,9 +166,10 @@ def main(argv=None, sy=None, out_dir=None):
     iface0, gw0 = default_route(sy)
     known = preferred(sy, args.iface) or []
     py_ok = sy.run([args.python, '-c', 'import serial'], timeout=20)[0] == 0
-    pre_ok = iface0 == args.iface and bool(gw0) and not gw0.startswith(AP_PREFIX) and args.return_ssid in known and py_ok
+    node_ok = not args.browser or sy.run([args.node, '--version'], timeout=20)[0] == 0
+    pre_ok = iface0 == args.iface and bool(gw0) and not gw0.startswith(AP_PREFIX) and args.return_ssid in known and py_ok and node_ok
     log('preflight', defaultIface=iface0, originalGatewayRecorded=bool(gw0), returnSsidPreferred=args.return_ssid in known,
-        apKnownBefore=ap_ssid in known, pythonHasPyserial=py_ok, ok=pre_ok)
+        apKnownBefore=ap_ssid in known, pythonHasPyserial=py_ok, nodeAvailable=node_ok, ok=pre_ok)
     if not pre_ok:
         report['e1'] = 'NOT RUN (preflight refused, network untouched)'; save(); return 2
     if args.dry_run:
@@ -157,6 +181,26 @@ def main(argv=None, sy=None, out_dir=None):
     for s in (signal.SIGTERM, signal.SIGHUP):
         try: signal.signal(s, on_signal)
         except (ValueError, OSError): pass
+    try:
+        port_handle = sy.hold_port(args.port)
+    except Exception as e:
+        log('hold-port', error=repr(e)); report['e1'] = 'NOT RUN (USB port unavailable, network untouched)'; save(); return 2
+    log('hold-port', held=True); sy.sleep(12)  # board restarted by the open; let it finish the boot self-check
+    # The board's STA boot attempts can move the AP channel; switch only once Wi-Fi settled.
+    def settled():
+        try: st = sy.usb_status(port_handle)
+        except Exception: return None
+        return st if st and st.get('otaConfirmed') and st.get('ap') and st.get('wifi', {}).get('phase') in ('online', 'ap_only') else None
+    st = wait_for(sy, settled, 120, step=3)
+    log('board-settled', phase=st and st['wifi']['phase'], firmware=st and st.get('firmware'), bootId=st and st.get('bootId'))
+    if not st:
+        sy.release_port(port_handle); report['e1'] = 'NOT RUN (board Wi-Fi did not settle, network untouched)'; save(); return 2
+    backup = out_dir / f'{stamp}-e1-config-backup.json'
+    usb_cfg = lambda mode: sy.run([args.python, str(ROOT / 'scripts/e1_usb_config.py'), mode, '--port', args.port, '--file', str(backup)], timeout=120)
+    if args.browser:
+        code, out = usb_cfg('backup'); log('usb-backup', code=code, output=out[-200:])
+        if code != 0:
+            report['e1'] = 'NOT RUN (USB config backup failed, network untouched)'; sy.release_port(port_handle); save(); return 2
     test_ok = False
     try:
         code, out = sy.run(['networksetup', '-setairportnetwork', args.iface, ap_ssid, ap_pwd], timeout=60)
@@ -170,17 +214,33 @@ def main(argv=None, sy=None, out_dir=None):
             rc = sy.run_child([args.python, str(ROOT / 'scripts/check_p1c_http.py'), '--port', args.port, '--ap', '--log', str(hlog)],
                               str(stdout), args.budget, str(ROOT / 'scripts'))
             log('check', exit=rc, stdout=stdout.name, log=hlog.name)
-            test_ok = rc == 0
-            report['e1'] = 'PASS' if test_ok else f'FAIL ({rc})'
+            report['http'] = 'PASS' if rc == 0 else f'FAIL ({rc})'
+            browser_ok = True
+            if args.browser:
+                bout = out_dir / f'{stamp}-e1-browser.json'; bstd = out_dir / f'{stamp}-e1-browser-stdout.txt'
+                brc = sy.run_child([args.node, str(ROOT / 'scripts/e1_browser.mjs'), '--base', 'http://192.168.4.1', '--out', str(bout)],
+                                   str(bstd), args.browser_budget, str(ROOT))
+                log('browser', exit=brc, stdout=bstd.name, result=bout.name)
+                report['browser'] = 'PASS' if brc == 0 else f'FAIL ({brc})'; browser_ok = brc == 0
+            test_ok = rc == 0 and browser_ok
+            report['e1'] = ('PASS (HTTP/SSE' + (' + browser' if args.browser else ' only') + ')') if test_ok else \
+                'FAIL (' + ', '.join(f'{k} {report[k]}' for k in ('http', 'browser') if k in report and report[k] != 'PASS') + ')'
     except BaseException as e:  # includes Ctrl-C/SIGTERM: fall through to restore
         log('interrupted', error=repr(e)); report['e1'] = f'NOT RUN (interrupted: {e!r})'
     finally:
+        if args.browser:  # settings first, over USB: works without any network
+            try:
+                code, out = usb_cfg('restore'); report['configRestore'] = 'CONFIRMED' if code == 0 else f'NOT confirmed ({code}): {out[-160:]}'
+            except BaseException as e:
+                report['configRestore'] = f'NOT confirmed: {e!r}'
+            log('usb-config-restore', result=report['configRestore'])
         try:
             report['restore'] = restore(sy, args.iface, args.return_ssid, gw0, ap_ssid, ap_ssid in known, log)
         except BaseException as e:
             report['restore'] = {'confirmed': False, 'error': repr(e)}
+        sy.release_port(port_handle)
         save()
-    restored = bool(report['restore'] and report['restore'].get('confirmed'))
+    restored = bool(report['restore'] and report['restore'].get('confirmed')) and (not args.browser or report.get('configRestore') == 'CONFIRMED')
     return 0 if test_ok and restored else 5 if not test_ok and not restored else 3 if not test_ok else 4
 
 
