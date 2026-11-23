@@ -58,11 +58,14 @@ async function main() {
   const effective = () => evaluate("(async()=>{const r=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json','X-L8-Token':token},body:JSON.stringify({v:1,id:'e1-browser',cmd:'get_config',view:'effective',client:editorId})});return (await r.json()).result?.config?.strips?.[0]?.brightness})()");
   const idle = () => waitFor('!busy&&!previewInFlight', 15000);
 
-  // 2. continuous movement > 1 s: intermediate previews before release, final value delivered
-  let t0 = now(); await move(10, 50, 30, false); const before = since(t0).filter(r => r.url.endsWith('/api/preview')).length;
+  // 2. continuous movement > 1 s: an intermediate value is APPLIED on the device before release
+  const baseline = () => evaluate("(async()=>{const r=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json','X-L8-Token':token},body:JSON.stringify({v:1,id:'e1-browser-b',cmd:'get_config'})});return (await r.json()).result?.config?.strips?.[0]?.brightness})()");
+  let t0 = now(); const moving = move(10, 50, 30, false); await sleep(700);
+  const mid = await effective(); await moving; const before = since(t0).filter(r => r.url.endsWith('/api/preview')).length;
   await move(50, 51, 1); await idle(); await sleep(400);
   const eff = await effective();
-  check('continuous slider (>1 s): previews before release, final value applied', before >= 5 && eff === 51, {previewsBeforeRelease: before, effectiveBrightness: eff});
+  check('continuous slider (>1 s): intermediate value applied before release, final value applied',
+        typeof mid === 'number' && mid > 10 && mid < 50 && before >= 5 && eff === 51, {effectiveMidMovement: mid, previewsBeforeRelease: before, effectiveFinal: eff});
   check('one change request in flight (normal link)', maxConcurrent(since(t0)) === 1, {max: maxConcurrent(since(t0))});
 
   // 3. slow responses: latency emulation, still one request in flight and the final value delivered
@@ -71,32 +74,42 @@ async function main() {
   const slowList = since(t0); const effSlow = await effective();
   check('slow link: one request in flight, latest delivered', maxConcurrent(slowList) === 1 && effSlow === 80, {requests: slowList.length, max: maxConcurrent(slowList), effectiveBrightness: effSlow});
 
-  // 4. Save while a request is in flight; an edit during Save stays dirty
+  // 4. Save while a request is in flight: the click-time snapshot (60) is what gets saved,
+  //    the later edit (33) is only previewed and stays dirty; a second Save then saves 33.
   t0 = now(); await move(80, 60, 5, false);
   await evaluate("document.getElementById('save').click();true"); await move(60, 33, 5);
   await idle(); await sleep(800);
   const seq = since(t0).map(r => r.url.replace(BASE, '') + (r.body && r.url.endsWith('/api/preview') ? ':' + JSON.parse(r.body).patch?.brightness : ''));
   const saveAt = seq.findIndex(s => s === '/api/save'); const lateAfter = seq.slice(saveAt + 1).some(s => s.startsWith('/api/preview'));
+  const savedFirst = await baseline(), effAfterFirst = await effective();
   const dirtyText = await evaluate("document.getElementById('dirty').textContent"); const dirtyFlag = await evaluate('dirty');
-  check('Save during in-flight request: save sent, later edit previewed after it and still dirty', saveAt >= 0 && lateAfter && dirtyFlag === true && dirtyText !== 'Записано', {sequence: seq, dirtyText});
+  check('Save during in-flight request saves the click-time snapshot; later edit only previewed and dirty',
+        saveAt >= 0 && lateAfter && savedFirst === 60 && effAfterFirst === 33 && dirtyFlag === true && dirtyText !== 'Записано',
+        {sequence: seq, savedBaseline: savedFirst, effective: effAfterFirst, dirtyText});
   await send('Network.emulateNetworkConditions', {offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
   await evaluate("document.getElementById('save').click();true"); await idle(); await sleep(1500);
   const st = await evaluate("(async()=>{const r=await fetch('/api/status');return await r.json()})()");
-  const written = await waitFor("document.getElementById('dirty').textContent==='Записано'", 5000);
-  check('second Save: "Записано" with savedRevision == configRevision, Master unchanged', written && st.savedRevision === st.configRevision && st.master === masterBefore && !st.previewActive, {savedRevision: st.savedRevision, configRevision: st.configRevision, master: st.master});
+  const written = await waitFor("document.getElementById('dirty').textContent==='Записано'", 5000); const savedSecond = await baseline();
+  check('second Save: 33 saved, "Записано" with savedRevision == configRevision, Master unchanged',
+        written && savedSecond === 33 && st.savedRevision === st.configRevision && st.master === masterBefore && !st.previewActive,
+        {savedBaseline: savedSecond, savedRevision: st.savedRevision, configRevision: st.configRevision, master: st.master});
 
-  // 5. lost reply: offline during a preview -> no automatic resend; explicit Save reconciles first
-  await send('Network.emulateNetworkConditions', {offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
-  t0 = now(); await move(33, 40, 5); await sleep(9000);
-  const offlineTries = since(t0).length;
-  await send('Network.emulateNetworkConditions', {offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1});
-  const t1 = now(); await sleep(4000); const autoAfter = since(t1).length; const err = await evaluate('!!previewError');
-  check('lost reply: no automatic resend after the link returns', offlineTries === 1 && autoAfter === 0 && err, {offlineTries, autoAfter, previewError: err});
+  // 5. lost RESPONSE: the device applies the preview, the reply is dropped on the way back
+  //    (DevTools Fetch, response stage). No automatic resend; explicit Save reads status first.
+  let dropped = 0;
+  listeners.push(({method, params}) => { if (method === 'Fetch.requestPaused') { if (!dropped++) send('Fetch.failRequest', {requestId: params.requestId, errorReason: 'ConnectionReset'}); else send('Fetch.continueRequest', {requestId: params.requestId}); } });
+  await send('Fetch.enable', {patterns: [{urlPattern: '*/api/preview', requestStage: 'Response'}]});
+  t0 = now(); await evaluate(`(()=>{const el=${slider};el.value='44';el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true})()`);
+  await sleep(2500); await send('Fetch.disable');
+  const appliedOnDevice = await effective(); const sentOnce = since(t0).length; const err = await evaluate('!!previewError');
+  const t1 = now(); await sleep(6000); const autoAfter = since(t1).length;
+  check('lost response: device applied it, client did not resend automatically', dropped === 1 && appliedOnDevice === 44 && sentOnce === 1 && autoAfter === 0 && err,
+        {dropped, appliedOnDevice, sentOnce, autoAfter, previewError: err});
   const t2 = now(); const allT2 = () => [...reqs.values()].filter(r => r.start >= t2).map(r => r.method + ' ' + r.url.replace(BASE, ''));
   await evaluate("document.getElementById('save').click();true"); await idle(); await sleep(1500);
   const order = allT2(); const iStatus = order.indexOf('GET /api/status'), iApply = order.indexOf('POST /api/apply'), iSave = order.indexOf('POST /api/save');
-  const writtenAgain = await waitFor("document.getElementById('dirty').textContent==='Записано'", 5000);
-  check('explicit Save after loss: status read before apply and save, then "Записано"', iStatus >= 0 && iStatus < iApply && iApply < iSave && writtenAgain, {order});
+  const writtenAgain = await waitFor("document.getElementById('dirty').textContent==='Записано'", 5000); const savedLost = await baseline();
+  check('explicit Save after lost response: status read before apply and save, 44 saved, "Записано"', iStatus >= 0 && iStatus < iApply && iApply < iSave && writtenAgain && savedLost === 44, {order, savedBaseline: savedLost});
   check('Master unchanged through the browser run', (await evaluate("(async()=>(await (await fetch('/api/status')).json()).master)()")) === masterBefore, {masterBefore});
   results.push({name: 'hidden/visible tab', ok: null, note: 'NOT RUN in headless Chrome (visibility cannot be changed reliably); covered by check_ui.mjs'});
 }
