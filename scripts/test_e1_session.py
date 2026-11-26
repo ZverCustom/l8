@@ -31,18 +31,32 @@ class Board(NetFake):
                                               partial='ok', usb_verify=0, config_changed_by_flash=False, settle=True).items()
                        if k not in f})
         self.image, self.boot, self.flashes = self.f['image'], 1, []
+        self.open_handles, self.opened, self.closed_reads = set(), 0, 0
     def exists(self, path): return self.f['port']
+    def now(self):
+        self.now_calls = getattr(self, 'now_calls', 0) + 1
+        if self.now_calls > 200000: raise AssertionError('loop guard: a wait never reached its deadline')
+        return self.t
+    # Port lifecycle as pyserial: every open is a new handle; release closes exactly that one.
     def hold_port(self, port):
-        if self.f['hold_fail']: raise OSError('no such port')
-        return super().hold_port(port)
+        n = self.f['hold_fail']  # True: every open fails; integer N: open number N and later fail
+        if n is True or (type(n) is int and n and self.opened + 1 >= n):
+            raise OSError('no such port')
+        super().hold_port(port); self.opened += 1; self.open_handles.add(self.opened); self.held = True; return self.opened
+    def release_port(self, h):
+        self.calls.append(['release']); self.open_handles.discard(h); self.held = bool(self.open_handles)
+    def _check(self, h):
+        if h not in self.open_handles: self.closed_reads += 1; raise OSError('Attempting to use a port that is not open')
     def usb_status(self, h):
+        self._check(h)
         st = super().usb_status(h)
         if not self.f['settle']: st['otaConfirmed'] = False
         st.update(firmware='0.4.0+' + (OLD_SHA if self.image == 'old' else NEW_SHA)[:7], bootId=f'boot{self.boot}', master=self.f['master'],
                   channels=[{'on': self.f['output_on'] and i == 0, 'data': False} for i in range(8)])
         return st
     def usb_cmd(self, h, obj, timeout=8):
-        return {'deviceId': self.f['device']} if obj.get('cmd') == 'info' else None
+        self._check(h)
+        return {'deviceId': self.f['device'], 'limits': {'channels': 8}} if obj.get('cmd') == 'info' else None
     def run(self, cmd, timeout=30):
         if len(cmd) > 2 and str(cmd[1]).endswith('esptool.py'):
             self.calls.append(cmd)
@@ -229,6 +243,132 @@ class Session(unittest.TestCase):
         self.assertEqual(b.flashes, []); self.assertEqual(rep['imageLeft'], 'old (unchanged)'); self.assertEqual(b.image, 'old')
         self.assertEqual(code, 3); self.assertCleanedUp(b, rep)
 
+    def test_late_cleanup_puts_the_network_first(self):
+        """Cleanup starting late (a child overran its timeout): the rollback gets only its own
+        sub-budget, so the network restore still has its reserve. The image is reported UNKNOWN."""
+        b = Board(old_reset=True); real_run, real_child = b.run, b.run_child
+        def child(cmd, path, timeout, cwd):
+            res = real_child(cmd, path, timeout, cwd)
+            if any(str(c).endswith('check_p1c_http.py') for c in cmd): b.t = max(b.t, session.SESSION_LIMIT - 350)
+            return res
+        def run_(cmd, timeout=30):
+            t0 = b.t; res = real_run(cmd, timeout)
+            if len(cmd) > 2 and str(cmd[1]).endswith('esptool.py') and cmd[2] != 'version': b.t = t0 + timeout
+            if cmd[:2] == ['networksetup', '-setairportnetwork'] and cmd[3] == 'HomeNet': b.t += 100
+            return res
+        real_status = b.usb_status
+        def status(h):
+            st = real_status(h); b.t += 8
+            if len(b.flashes) > 1: st['otaConfirmed'] = False  # the rolled-back board never settles
+            return st
+        b.run_child, b.run, b.usb_status = child, run_, status
+        code, rep, _ = run(b)
+        self.assertTrue(rep['networkRestore']['confirmed'], rep['steps'][-8:]); self.assertEqual(b.network, 'home')
+        self.assertIn('UNKNOWN', rep['imageLeft']); self.assertEqual(code, 5)
+        self.assertLessEqual(rep['sessionSeconds'], session.SESSION_LIMIT)
+
+    # ---- R16: the port handle after reopening ----
+    def test_reopened_port_is_used_after_flash_and_rollback(self):
+        b = Board(); code, rep, _ = run(b)
+        self.assertEqual(code, 0); self.assertEqual(b.closed_reads, 0); self.assertEqual(b.opened, 2)
+        b = Board(new_reset=True); code, rep, _ = run(b)
+        self.assertEqual(rep['imageLeft'], 'old (rolled back)'); self.assertEqual(b.closed_reads, 0); self.assertEqual(code, 3)
+
+    def test_reopen_failure_after_flash_is_reported_and_cleanup_continues(self):
+        b = Board(hold_fail=2); code, rep, _ = run(b)
+        self.assertEqual(b.closed_reads, 0)
+        self.assertIn('not measured', rep['newImage']); self.assertIn('UNKNOWN', rep['imageLeft'])
+        self.assertTrue(rep['networkRestore']['confirmed']); self.assertEqual(b.network, 'home'); self.assertEqual(code, 5)
+
+    # ---- R17: a join that may have changed the network is always followed by a restore ----
+    def interrupted_join(self, when, nth=1, exc=KeyboardInterrupt):
+        b = Board(); real = b.run; seen = []
+        def run_(cmd, timeout=30):
+            is_join = cmd[:2] == ['networksetup', '-setairportnetwork'] and cmd[3] == AP
+            if is_join: seen.append(1)
+            if is_join and len(seen) == nth and when == 'before': raise exc('signal before join')
+            reply = real(cmd, timeout)
+            if is_join and len(seen) == nth and when == 'after-effect': raise exc('signal after join took effect')
+            if cmd[0] == 'ipconfig' and len(seen) == nth and when == 'address-wait' and b.network == 'ap': raise exc('signal in address wait')
+            return reply
+        b.run = run_
+        return b
+
+    def test_interrupted_join_always_restores_network(self):
+        for when in ('before', 'after-effect', 'address-wait'):
+            for nth in (1, 2):
+                for exc in (KeyboardInterrupt, RuntimeError):
+                    with self.subTest(when=when, join=nth, exc=exc.__name__):
+                        b = self.interrupted_join(when, nth, exc); code, rep, _ = run(b)
+                        self.assertEqual(b.network, 'home'); self.assertTrue(rep['networkRestore']['confirmed'])
+                        self.assertEqual(rep['configRestore'], 'CONFIRMED'); self.assertEqual(code, 3)
+                        if nth == 2: self.assertEqual(b.image, 'old', 'new image not kept after an aborted session')
+
+    def test_interrupted_join_with_failed_restore_is_not_hidden(self):
+        b = self.interrupted_join('after-effect'); b.f.update(rejoin='fail', autojoin=False)
+        code, rep, _ = run(b)
+        self.assertFalse(rep['networkRestore']['confirmed']); self.assertEqual(code, 5)
+
+    # ---- R18: outputs must be proven off ----
+    def test_unproven_outputs_refuse_before_any_change(self):
+        def bad(mutate):
+            b = Board(); real = b.usb_status
+            def st(h):
+                x = real(h); mutate(x); return x
+            b.usb_status = st; return b
+        cases = {
+            'channels missing': lambda x: x.pop('channels'),
+            'channels empty': lambda x: x.update(channels=[]),
+            'channels short': lambda x: x.update(channels=x['channels'][:7]),
+            'channels not a list': lambda x: x.update(channels={'0': {}}),
+            'channel not an object': lambda x: x['channels'].__setitem__(3, 'off'),
+            'on missing': lambda x: x['channels'][2].pop('on'),
+            'data missing': lambda x: x['channels'][5].pop('data'),
+            'on null': lambda x: x['channels'][0].update(on=None),
+            'data as 0': lambda x: x['channels'][1].update(data=0),
+            'master missing': lambda x: x.pop('master'),
+            'master null': lambda x: x.update(master=None),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name):
+                b = bad(mutate); code, rep, _ = run(b)
+                self.assertEqual(code, 2); self.assertIn('NOT RUN', rep['result']); self.assertEqual(changes(b), ([], []))
+        b = Board(); real_cmd = b.usb_cmd
+        b.usb_cmd = lambda h, obj, timeout=8: {**real_cmd(h, obj, timeout), 'limits': {'channels': 6}}
+        code, rep, _ = run(b)
+        self.assertEqual(code, 2); self.assertEqual(changes(b), ([], []))
+
+    # ---- R19: the whole session stays within SESSION_LIMIT at worst admissible durations ----
+    def test_worst_case_durations_stay_within_session_limit(self):
+        class Timed(Board):
+            """Review P1-013 model: every command and child takes its full timeout, every USB
+            status/info read 8 s; the new image settles late; rollback never settles."""
+            def __init__(self, delay, **f):
+                super().__init__(**f); self.delay, self.open_at = delay, 0
+            def hold_port(self, port):
+                h = super().hold_port(port); self.open_at = self.t; return h
+            def usb_status(self, h):
+                self.t += 8; st = super().usb_status(h)
+                if self.image == 'new' and self.t - self.open_at < self.delay: st['otaConfirmed'] = False
+                if len(self.flashes) > 1 and self.image == 'old': st['otaConfirmed'] = False
+                return st
+            def usb_cmd(self, h, obj, timeout=8):
+                self.t += timeout; return super().usb_cmd(h, obj, timeout)
+            def run(self, cmd, timeout=30):
+                t0 = self.t; res = super().run(cmd, timeout); self.t += max(0, timeout - (self.t - t0)); return res
+            def run_child(self, cmd, path, timeout, cwd):
+                t0 = self.t; res = super().run_child(cmd, path, timeout, cwd); self.t += max(0, timeout - (self.t - t0)); return res
+        worst = 0
+        for delay in (0, 30, 60, 90, 100, 110, 120, 125, 140, 200):
+            for extra in ({'rejoin': 'hang', 'autojoin': False}, {'rejoin': 'hang'}, {}):
+                with self.subTest(delay=delay, **extra):
+                    b = Timed(delay, **extra); code, rep, _ = run(b)
+                    worst = max(worst, rep['sessionSeconds'])
+                    self.assertLessEqual(rep['sessionSeconds'], session.SESSION_LIMIT, rep['steps'][-6:])
+                    if rep['imageLeft'].startswith('UNKNOWN') or not rep['networkRestore'].get('confirmed', True):
+                        self.assertIn(code, (4, 5))
+        print('worst session seconds', worst)
+
     def test_report_private_and_without_secrets(self):
         old = os.umask(0o022)
         try:
@@ -241,6 +381,50 @@ class Session(unittest.TestCase):
             self.assertNotIn(pwd, text)
         finally:
             os.umask(old)
+
+
+class Clock:
+    """Raw system for Budget tests: records timeouts it was given; time moves only on sleep.
+    A loop guard turns a wait that never ends into a test failure instead of a hang."""
+    def __init__(self):
+        self.t, self.timeouts, self.calls = 0.0, [], 0
+    def now(self):
+        self.calls += 1
+        if self.calls > 10000: raise AssertionError('wait did not stop at the phase deadline')
+        return self.t
+    def sleep(self, s): self.t += s
+    def run(self, cmd, timeout=30): self.timeouts.append(timeout); return 0, ''
+    def run_child(self, cmd, path, timeout, cwd): self.timeouts.append(timeout); return 0
+    def usb_status(self, h): self.timeouts.append('status'); return {}
+    def usb_cmd(self, h, obj, timeout=8): self.timeouts.append(timeout); return {}
+
+
+class BudgetProxy(unittest.TestCase):
+    def test_blocking_calls_are_clamped_to_the_phase(self):
+        raw = Clock(); b = session.Budget(raw)
+        with b.phase(10):
+            b.run(['x'], timeout=60); b.run_child(['x'], 'p', 300, '.'); b.usb_cmd('h', {}); b.sleep(30)
+        self.assertEqual(raw.timeouts, [10, 10, 8]); self.assertEqual(raw.t, 10)
+        with b.phase(5):
+            self.assertIsNone(b.usb_status('h'), 'a status read may take 8 s, only 5 s are left')
+            b.usb_cmd('h', {}); self.assertEqual(raw.timeouts[-1], 5)
+        with b.phase(0):
+            self.assertEqual(b.run(['x']), (124, 'no time left')); self.assertEqual(b.run_child(['x'], 'p', 9, '.'), 'no time left')
+        self.assertEqual(len(raw.timeouts), 4, 'nothing was called without time')
+
+    def test_phases_nest_and_restore(self):
+        raw = Clock(); b = session.Budget(raw); b.until = 100
+        with b.phase(500):
+            self.assertEqual(b.until, 100, 'an inner phase cannot extend the outer one')
+            with b.phase(until=40): self.assertEqual(b.until, 40)
+            self.assertEqual(b.until, 100)
+        self.assertEqual(b.until, 100)
+
+    def test_waits_stop_at_the_phase_deadline(self):
+        raw = Clock(); b = session.Budget(raw)
+        with b.phase(20):
+            self.assertIsNone(session.ap_run.wait_for(b, lambda: None, 3600, step=3))
+        self.assertLessEqual(raw.t, 20)
 
 
 if __name__ == '__main__':

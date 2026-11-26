@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """One bounded E1/WDT hardware session, unattended (start detached, e.g. `nohup ... &`).
 
-Route (each step has its own time limit; a step starts only if it fits before the main
-deadline, which leaves CLEANUP_RESERVE of the 25-minute session for restore):
+Route:
   preflight   nothing is changed: USB port, board identity (deviceId, firmware = old image),
-              Master/outputs/DATA off, verified image manifests (old 09e092a without the
-              Stream yield, new with it), Python/node/esptool, Wi-Fi interface + original
-              gateway, return SSID preferred AND --return-confirmed (the user confirmed that
-              network works now; being preferred proves nothing). Any doubt -> exit 2, NOT RUN.
+              Master and every channel's output and DATA proven off (8 channels, explicit
+              false values; anything missing or malformed refuses), verified image manifests
+              (old 09e092a without the Stream yield, new with it), Python/node/esptool,
+              Wi-Fi interface + original gateway, return SSID preferred AND --return-confirmed
+              (the user confirmed that network works now). Any doubt -> exit 2, NOT RUN.
   backup      configuration over USB into a private file (0600), read back and compared.
   old         join the board AP, e1_partial_request.py on the old image (reset expected).
   flash new   release the port, esptool writes the new image set (bootloader, partitions,
@@ -19,12 +19,20 @@ deadline, which leaves CLEANUP_RESERVE of the 25-minute session for restore):
               runs): image policy (keep the new image only if the old reset was reproduced,
               the new image did not reset and HTTP recovered, and E1 passed; otherwise flash the
               old image back), configuration restore over USB (confirmed), network restore
-              (e1_ap_run.restore), port release. Each cleanup step is isolated and bounded.
+              (e1_ap_run.restore, attempted whenever a join may have changed the network),
+              port release.
+
+Time: every blocking operation goes through Budget, which clamps its timeout (commands,
+child processes, USB reads, sleeps and the waits inside e1_ap_run) to the deadline of the
+current phase. Phases: main steps end by START + SESSION_LIMIT - CLEANUP_RESERVE and a step
+starts only if its whole limit fits; cleanup has sub-deadlines (rollback, then configuration,
+then network) so the session ends by START + SESSION_LIMIT. A step cut by its deadline is
+reported as not confirmed, never as success.
 Results are reported separately; nothing is merged into one PASS. The JSON report is
 private (0600). Passwords and tokens are never written.
 Exit: 0 all passed and cleanup confirmed; 2 preflight refused (nothing changed);
 3 a check failed / not measured, cleanup confirmed; 4 cleanup not confirmed; 5 both."""
-import argparse, json, os, signal, sys, time
+import argparse, contextlib, json, os, signal, sys, time
 from pathlib import Path
 
 import e1_ap_run as ap_run
@@ -32,10 +40,15 @@ import e1_images
 
 ROOT = ap_run.ROOT
 SESSION_LIMIT = 25 * 60
-# Worst-case cleanup: rollback flash 120 + settle 132 + config restore 60 + network restore
-# (e1_ap_run.restore: rejoin 60, wait 45, power cycle 43, wait 90, forget 20, ping 15) = 585 s.
-CLEANUP_RESERVE = 10 * 60
-LIMITS = {'settle': 120, 'usb-config': 60, 'join': 60, 'partial': 75, 'flash': 120}
+USB_READ = 8
+CHANNELS = 8
+# Whole-step limits, including everything inside the step (sleeps, polls, USB reads).
+LIMITS = {'settle': 150, 'usb-config': 60, 'join': 90, 'partial': 75, 'flash': 120}
+# Cleanup sub-budgets (s): rollback = flash + settle; configuration restore; network restore.
+ROLLBACK_RESERVE = LIMITS['flash'] + LIMITS['settle']
+CONFIG_RESERVE = 75
+NETWORK_RESERVE = 330
+CLEANUP_RESERVE = ROLLBACK_RESERVE + CONFIG_RESERVE + NETWORK_RESERVE
 # E1 gets what is left before the main deadline, split HTTP/browser, with these bounds (s).
 E1_HTTP = (120, 300)
 E1_BROWSER = (90, 240)
@@ -43,7 +56,7 @@ ESPTOOL = Path.home() / '.platformio/packages/tool-esptoolpy/esptool.py'
 
 
 class System(ap_run.System):
-    def usb_cmd(self, handle, obj, timeout=8):
+    def usb_cmd(self, handle, obj, timeout=USB_READ):
         handle.reset_input_buffer(); handle.write((json.dumps(obj) + '\n').encode()); handle.flush()
         end = time.monotonic() + timeout; raw = b''
         while time.monotonic() < end:
@@ -53,6 +66,44 @@ class System(ap_run.System):
                 if line.startswith('L8 {'): return json.loads(line[3:])
         return None
     def exists(self, path): return Path(path).exists()
+
+
+class Budget:
+    """System proxy: each blocking call is clamped to the current phase deadline `until`."""
+    def __init__(self, sy):
+        self.sy, self.until = sy, float('inf')
+    def now(self): return self.sy.now()
+    def left(self): return self.until - self.sy.now()
+    def expired(self): return self.left() <= 0
+    def sleep(self, s):
+        if self.left() > 0: self.sy.sleep(min(s, self.left()))
+    def run(self, cmd, timeout=30):
+        if self.left() <= 0: return 124, 'no time left'
+        return self.sy.run(cmd, timeout=min(timeout, self.left()))
+    def run_child(self, cmd, path, timeout, cwd):
+        if self.left() <= 0: return 'no time left'
+        return self.sy.run_child(cmd, path, min(timeout, self.left()), cwd)
+    def usb_status(self, h):
+        return self.sy.usb_status(h) if self.left() >= USB_READ else None  # one read may take USB_READ
+    def usb_cmd(self, h, obj):
+        return self.sy.usb_cmd(h, obj, timeout=min(USB_READ, self.left())) if self.left() >= 1 else None
+    def hold_port(self, port): return self.sy.hold_port(port)
+    def release_port(self, h): return self.sy.release_port(h)
+    def exists(self, path): return self.sy.exists(path)
+    @contextlib.contextmanager
+    def phase(self, seconds=None, until=None):
+        old = self.until
+        end = until if until is not None else self.now() + seconds
+        self.until = min(old, end)
+        try: yield
+        finally: self.until = old
+
+
+def outputs_proven_off(st, channels=CHANNELS):
+    """Master and every channel's output and DATA explicitly false; anything else is not proof."""
+    ch = st.get('channels') if isinstance(st, dict) else None
+    return (isinstance(st, dict) and st.get('master') is False and isinstance(ch, list) and len(ch) == channels
+            and all(isinstance(c, dict) and c.get('on') is False and c.get('data') is False for c in ch))
 
 
 def classify_old(code):
@@ -67,7 +118,7 @@ def classify_new(code, recovery):
 
 
 def main(argv=None, sy=None, out_dir=None):
-    sy = sy or System()
+    raw = sy or System()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--port', required=True)
     ap.add_argument('--device-id', required=True, help='exact deviceId of the board (USB info)')
@@ -82,7 +133,9 @@ def main(argv=None, sy=None, out_dir=None):
     ap.add_argument('--dry-run', action='store_true', help='preflight only, then stop')
     args = ap.parse_args(argv)
     os.umask(0o077)
+    sy = Budget(raw)
     start = sy.now(); deadline = start + SESSION_LIMIT; main_deadline = deadline - CLEANUP_RESERVE
+    sy.until = main_deadline
     stamp = time.strftime('%Y-%m-%d-%H%M%S')
     out_dir = Path(out_dir or ROOT / 'logs/diagnostics'); out_dir.mkdir(parents=True, exist_ok=True)
     report = {'stamp': stamp, 'steps': [], 'oldWdt': 'not measured', 'newImage': 'not measured', 'usbHttpSse': 'NOT RUN',
@@ -99,8 +152,19 @@ def main(argv=None, sy=None, out_dir=None):
     def child(name, cmd, limit, cwd=ROOT / 'scripts'):
         path = out_dir / f'{stamp}-{name}.txt'
         rc = sy.run_child(cmd, str(path), limit, str(cwd)); log(name, exit=rc, stdout=path.name); return rc, path
-    usb_cfg = lambda mode, backup: sy.run([args.python, str(ROOT / 'scripts/e1_usb_config.py'), mode, '--port', args.port, '--file', str(backup)],
-                                          timeout=LIMITS['usb-config'])
+    def usb_cfg(mode, backup):
+        return sy.run([args.python, str(ROOT / 'scripts/e1_usb_config.py'), mode, '--port', args.port, '--file', str(backup)],
+                      timeout=LIMITS['usb-config'])
+    state = {'network': False, 'flashed': False, 'handle': None}
+    def board_ready():
+        st = sy.usb_status(state['handle'])  # always the currently open handle
+        return st if st and st.get('otaConfirmed') and st.get('ap') and st.get('wifi', {}).get('phase') in ('online', 'ap_only') else None
+    def settle():
+        """(status, info) from the currently held port once Wi-Fi settled, within LIMITS['settle']."""
+        with sy.phase(LIMITS['settle']):
+            sy.sleep(12)
+            st = ap_run.wait_for(sy, board_ready, LIMITS['settle'], step=3)
+            return st, (sy.usb_cmd(state['handle'], {'cmd': 'info'}) if st else None)
 
     # ---- preflight: read only ----
     ap_ssid, ap_pwd = ap_run.ap_credentials()
@@ -121,55 +185,63 @@ def main(argv=None, sy=None, out_dir=None):
         report['result'] = 'NOT RUN (preflight refused, nothing changed)'; save(); return 2
     old_ver = '0.4.0+' + old_m['sourceCommit'][:7]; new_ver = '0.4.0+' + new_m['sourceCommit'][:7]
     try:
-        handle = sy.hold_port(args.port)
+        state['handle'] = sy.hold_port(args.port)
     except Exception as e:
         log('hold-port', error=repr(e)); report['result'] = 'NOT RUN (USB port unavailable, nothing changed)'; save(); return 2
-    def board_ready():
-        st = sy.usb_status(handle)
-        return st if st and st.get('otaConfirmed') and st.get('ap') and st.get('wifi', {}).get('phase') in ('online', 'ap_only') else None
-    sy.sleep(12)
-    st = ap_run.wait_for(sy, board_ready, LIMITS['settle'], step=3)
-    info = sy.usb_cmd(handle, {'cmd': 'info'}) if st else None
-    outputs_off = bool(st) and st.get('master') is False and all(not c.get('on') and not c.get('data') for c in st.get('channels', [{}]))
+    def refuse(why):
+        sy.release_port(state['handle']); report['result'] = f'NOT RUN ({why}, nothing changed)'; save(); return 2
+    try:
+        st, info = settle()
+    except Exception as e:
+        log('preflight-board', error=repr(e)); return refuse('board not readable')
+    limits = (info or {}).get('limits')
     board = dict(settled=bool(st), deviceIdMatches=bool(info) and info.get('deviceId') == args.device_id,
-                 firmware=st and st.get('firmware'), firmwareIsOld=bool(st) and st.get('firmware') == old_ver, outputsOff=outputs_off)
+                 channelsDeclared=limits.get('channels') if isinstance(limits, dict) else None,
+                 firmware=st and st.get('firmware'), firmwareIsOld=bool(st) and st.get('firmware') == old_ver,
+                 outputsOff=outputs_proven_off(st))
     log('preflight-board', **board)
-    if not (board['settled'] and board['deviceIdMatches'] and board['firmwareIsOld'] and outputs_off):
-        sy.release_port(handle); report['result'] = 'NOT RUN (board identity/state not proven, nothing changed)'; save(); return 2
+    if not (board['settled'] and board['deviceIdMatches'] and board['firmwareIsOld'] and board['outputsOff']
+            and board['channelsDeclared'] in (None, CHANNELS)):
+        return refuse('board identity/state not proven')
     backup = out_dir / f'{stamp}-e1-config-backup.json'
-    code, out = usb_cfg('backup', backup); vcode, vout = usb_cfg('verify', backup) if code == 0 else (None, '')
+    code, _ = usb_cfg('backup', backup); vcode = usb_cfg('verify', backup)[0] if code == 0 else None
     log('usb-backup', code=code, verify=vcode)
     if code != 0 or vcode != 0:
-        sy.release_port(handle); report['result'] = 'NOT RUN (configuration backup not verified, nothing changed)'; save(); return 2
+        return refuse('configuration backup not verified')
     if args.dry_run:
-        sy.release_port(handle); report['result'] = 'NOT RUN (dry-run: preflight passed)'; save(); return 0
+        sy.release_port(state['handle']); report['result'] = 'NOT RUN (dry-run: preflight passed)'; save(); return 0
 
     # ---- session ----
-    state = {'network': False, 'flashed': False, 'handle': handle}
     def on_signal(signum, frame): raise KeyboardInterrupt(f'signal {signum}')
     for s in (signal.SIGTERM, signal.SIGHUP):
         try: signal.signal(s, on_signal)
         except (ValueError, OSError): pass
     def join_ap():
         if not fits('join'): return False
-        code, out = sy.run(['networksetup', '-setairportnetwork', args.iface, ap_ssid, ap_pwd], timeout=60)
+        # Mark first: the network may change even if the command does not return (signal, timeout).
         state['network'] = True; report['networkRestore'] = 'pending'
-        addr = ap_run.wait_for(sy, lambda: (lambda a: a if a and a.startswith(ap_run.AP_PREFIX) else None)(ap_run.address(sy, args.iface)), LIMITS['join'] - 15)
+        with sy.phase(LIMITS['join']):
+            code, out = sy.run(['networksetup', '-setairportnetwork', args.iface, ap_ssid, ap_pwd], timeout=60)
+            addr = ap_run.wait_for(sy, lambda: (lambda a: a if a and a.startswith(ap_run.AP_PREFIX) else None)(ap_run.address(sy, args.iface)),
+                                   LIMITS['join'])
         log('join-ap', code=code, output=out.replace(ap_pwd, '<pw>')[:120], address=addr); return bool(addr)
     def partial(name):
         if not fits('partial'): return None, None
-        rc, path = child(name, [args.python, str(ROOT / 'scripts/e1_partial_request.py'), '--port', args.port], LIMITS['partial'])
+        with sy.phase(LIMITS['partial']):
+            rc, path = child(name, [args.python, str(ROOT / 'scripts/e1_partial_request.py'), '--port', args.port], LIMITS['partial'])
         try: res = json.loads(Path(path).read_text().strip().splitlines()[-1])
         except (OSError, ValueError, IndexError): res = {}
         return rc, res.get('httpRecoveryS')
     def flash(manifest_path, m):
-        sy.release_port(state['handle']); state['handle'] = None
-        cmd = [args.python, args.esptool, '--port', args.port] + e1_images.flash_args(m, Path(manifest_path).parent)
-        code, out = sy.run(cmd, timeout=LIMITS['flash']); log('flash', role=m['role'], code=code, output=out[-160:]); return code == 0
+        if state['handle'] is not None:
+            sy.release_port(state['handle']); state['handle'] = None
+        with sy.phase(LIMITS['flash']):
+            cmd = [args.python, args.esptool, '--port', args.port] + e1_images.flash_args(m, Path(manifest_path).parent)
+            code, out = sy.run(cmd, timeout=LIMITS['flash'])
+        log('flash', role=m['role'], code=code, output=out[-160:]); return code == 0
     def settle_as(version):
-        state['handle'] = sy.hold_port(args.port); sy.sleep(12)
-        st = ap_run.wait_for(sy, board_ready, LIMITS['settle'], step=3)
-        i = sy.usb_cmd(state['handle'], {'cmd': 'info'}) if st else None
+        state['handle'] = sy.hold_port(args.port)
+        st, i = settle()
         ok = bool(st) and st.get('firmware') == version and bool(i) and i.get('deviceId') == args.device_id
         log('settled', expected=version, firmware=st and st.get('firmware'), ok=ok); return ok
 
@@ -190,7 +262,8 @@ def main(argv=None, sy=None, out_dir=None):
                         if http_s >= E1_HTTP[0] and browser_s >= E1_BROWSER[0]:
                             e1 = {}
                             log('e1-budget', http=http_s, browser=browser_s)
-                            e1_ok = ap_run.run_checks(sy, args.python, args.port, args.node, http_s, browser_s, out_dir, stamp, e1, log)
+                            with sy.phase(http_s + browser_s):
+                                e1_ok = ap_run.run_checks(sy, args.python, args.port, args.node, http_s, browser_s, out_dir, stamp, e1, log)
                             report['usbHttpSse'] = e1.get('http', 'NOT RUN'); report['browser'] = e1.get('browser', 'NOT RUN')
                         else:
                             log('skip-no-time', steps=['http', 'browser'], left=round(left))
@@ -205,8 +278,9 @@ def main(argv=None, sy=None, out_dir=None):
         for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
             try: signal.signal(s, signal.SIG_IGN)
             except (ValueError, OSError): pass
+        sy.until = deadline
         cleanup_ok = cleanup(sy, args, state, report, log, old_repro and new_ok and e1_ok, flash, settle_as, old_ver, backup,
-                             usb_cfg, gw0, ap_ssid, ap_ssid in known)
+                             usb_cfg, gw0, ap_ssid, ap_ssid in known, deadline)
         report['sessionSeconds'] = round(sy.now() - start, 1); save()
     tests_ok = old_repro and new_ok and e1_ok
     report['result'] = 'PASS' if tests_ok and cleanup_ok else 'see fields'
@@ -214,29 +288,35 @@ def main(argv=None, sy=None, out_dir=None):
     return 0 if tests_ok and cleanup_ok else 5 if not tests_ok and not cleanup_ok else 4 if not cleanup_ok else 3
 
 
-def cleanup(sy, args, state, report, log, keep_new, flash, settle_as, old_ver, backup, usb_cfg, gw0, ap_ssid, ap_known):
+def cleanup(sy, args, state, report, log, keep_new, flash, settle_as, old_ver, backup, usb_cfg, gw0, ap_ssid, ap_known, deadline):
+    """Each part has its own sub-deadline, so a slow part cannot eat the later ones."""
     def step(name, fn):
         try: return fn()
         except BaseException as e: log(name, error=repr(e)); return None
     image_ok = True
-    if state['flashed']:
-        if keep_new:
-            report['imageLeft'] = 'new (comparison and E1 passed)'
-        else:
-            back = step('rollback-flash', lambda: flash(args.old, json.loads(Path(args.old).read_text())) and settle_as(old_ver))
-            image_ok = bool(back)
-            log('rollback', confirmed=image_ok)
-            report['imageLeft'] = 'old (rolled back)' if back else 'UNKNOWN (rollback to old image NOT confirmed)'
-    if state['handle'] is None:
-        step('re-hold-port', lambda: state.update(handle=sy.hold_port(args.port)) or sy.sleep(12))
-    code = step('usb-config-restore', lambda: usb_cfg('restore', backup)[0])
-    report['configRestore'] = 'CONFIRMED' if code == 0 else f'NOT confirmed ({code})'
-    log('usb-config-restore', result=report['configRestore'])
-    if state['network']:
-        res = step('network-restore', lambda: ap_run.restore(sy, args.iface, args.return_ssid, gw0, ap_ssid, ap_known, log))
-        report['networkRestore'] = res or {'confirmed': False}
-        log('network-restore', confirmed=report['networkRestore'].get('confirmed'))
-    if state['handle'] is not None: step('release-port', lambda: sy.release_port(state['handle']))
+    with sy.phase(until=deadline - CONFIG_RESERVE - NETWORK_RESERVE):
+        if state['flashed']:
+            if keep_new:
+                report['imageLeft'] = 'new (comparison and E1 passed)'
+            else:
+                back = step('rollback-flash', lambda: flash(args.old, json.loads(Path(args.old).read_text())) and settle_as(old_ver))
+                image_ok = bool(back)
+                log('rollback', confirmed=image_ok)
+                report['imageLeft'] = 'old (rolled back)' if back else 'UNKNOWN (rollback to old image NOT confirmed)'
+    with sy.phase(until=deadline - NETWORK_RESERVE):
+        if state['handle'] is None:
+            def rehold():
+                state['handle'] = sy.hold_port(args.port); sy.sleep(12)
+            step('re-hold-port', rehold)
+        code = step('usb-config-restore', lambda: usb_cfg('restore', backup)[0])
+        report['configRestore'] = 'CONFIRMED' if code == 0 else f'NOT confirmed ({code})'
+        log('usb-config-restore', result=report['configRestore'])
+    with sy.phase(until=deadline):
+        if state['network']:
+            res = step('network-restore', lambda: ap_run.restore(sy, args.iface, args.return_ssid, gw0, ap_ssid, ap_known, log))
+            report['networkRestore'] = res or {'confirmed': False}
+            log('network-restore', confirmed=report['networkRestore'].get('confirmed'))
+        if state['handle'] is not None: step('release-port', lambda: sy.release_port(state['handle']))
     net_ok = not state['network'] or bool(report['networkRestore'].get('confirmed'))
     return image_ok and code == 0 and net_ok
 

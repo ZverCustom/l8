@@ -102,7 +102,8 @@ def wait_for(sy, pred, seconds, step=2):
         except Exception:
             v = None
         if v: return v
-        if sy.now() >= end: return None
+        # A deadline-aware System (e1_session.Budget) ends the wait at its phase deadline too.
+        if sy.now() >= end or getattr(sy, 'expired', lambda: False)(): return None
         sy.sleep(step)
 
 
