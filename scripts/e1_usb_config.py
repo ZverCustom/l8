@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """USB backup/restore of the L8 configuration for unattended runs (no network needed).
 backup:  get_config -> file (0600; password is redacted by firmware, keepPassword=true)
-restore: usb_restore.restore() -> confirmed write and identical content, else exit 1."""
+restore: usb_restore.restore() -> confirmed write and identical content, else exit 1.
+verify:  get_config equals the file (read only, e.g. after a flash), else exit 1."""
 import argparse, json, os, sys, time
 import serial
 from usb_restore import restore
 
 ap = argparse.ArgumentParser(description=__doc__)
-ap.add_argument('mode', choices=['backup', 'restore']); ap.add_argument('--port', required=True); ap.add_argument('--file', required=True)
+ap.add_argument('mode', choices=['backup', 'restore', 'verify']); ap.add_argument('--port', required=True); ap.add_argument('--file', required=True)
 a = ap.parse_args()
 s = serial.Serial(); s.port = a.port; s.baudrate = 115200; s.timeout = .5; s.dtr = False; s.rts = False; s.open()
 def cmd(o, timeout=12):
@@ -27,5 +28,8 @@ if a.mode == 'backup':
     fd = os.open(a.file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w') as f: json.dump(cfg, f)
     print('backup ok'); sys.exit(0)
+if a.mode == 'verify':
+    same = cmd({'cmd': 'get_config'}) == json.load(open(a.file))
+    print('verify', 'SAME' if same else 'DIFFERENT'); sys.exit(0 if same else 1)
 ok, why = restore(cmd, json.load(open(a.file)))
 print('restore', 'CONFIRMED' if ok else 'NOT confirmed: ' + why); sys.exit(0 if ok else 1)

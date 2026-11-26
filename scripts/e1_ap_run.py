@@ -139,6 +139,27 @@ def restore(sy, iface, return_ssid, gw0, ap_ssid, ap_known_before, log):
     return result
 
 
+def run_checks(sy, python, port, node, budget, browser_budget, out_dir, stamp, report, log):
+    """check_p1c_http.py --ap, then (node given) e1_browser.mjs, each under its own budget.
+    The computer must already be on the AP. Sets report http/browser/e1; True if all passed."""
+    stdout = out_dir / f'{stamp}-e1-http-stdout.txt'; hlog = out_dir / f'{stamp}-e1-http.log'
+    rc = sy.run_child([python, str(ROOT / 'scripts/check_p1c_http.py'), '--port', port, '--ap', '--log', str(hlog)],
+                      str(stdout), budget, str(ROOT / 'scripts'))
+    log('check', exit=rc, stdout=stdout.name, log=hlog.name)
+    report['http'] = 'PASS' if rc == 0 else f'FAIL ({rc})'
+    browser_ok = True
+    if node:
+        bout = out_dir / f'{stamp}-e1-browser.json'; bstd = out_dir / f'{stamp}-e1-browser-stdout.txt'
+        brc = sy.run_child([node, str(ROOT / 'scripts/e1_browser.mjs'), '--base', 'http://192.168.4.1', '--out', str(bout)],
+                           str(bstd), browser_budget, str(ROOT))
+        log('browser', exit=brc, stdout=bstd.name, result=bout.name)
+        report['browser'] = 'PASS' if brc == 0 else f'FAIL ({brc})'; browser_ok = brc == 0
+    ok = rc == 0 and browser_ok
+    report['e1'] = ('PASS (HTTP/SSE' + (' + browser' if node else ' only') + ')') if ok else \
+        'FAIL (' + ', '.join(f'{k} {report[k]}' for k in ('http', 'browser') if k in report and report[k] != 'PASS') + ')'
+    return ok
+
+
 def main(argv=None, sy=None, out_dir=None):
     sy = sy or System()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -211,21 +232,8 @@ def main(argv=None, sy=None, out_dir=None):
         if not addr:
             report['e1'] = 'NOT RUN (no AP address)'
         else:
-            stdout = out_dir / f'{stamp}-e1-http-stdout.txt'; hlog = out_dir / f'{stamp}-e1-http.log'
-            rc = sy.run_child([args.python, str(ROOT / 'scripts/check_p1c_http.py'), '--port', args.port, '--ap', '--log', str(hlog)],
-                              str(stdout), args.budget, str(ROOT / 'scripts'))
-            log('check', exit=rc, stdout=stdout.name, log=hlog.name)
-            report['http'] = 'PASS' if rc == 0 else f'FAIL ({rc})'
-            browser_ok = True
-            if args.browser:
-                bout = out_dir / f'{stamp}-e1-browser.json'; bstd = out_dir / f'{stamp}-e1-browser-stdout.txt'
-                brc = sy.run_child([args.node, str(ROOT / 'scripts/e1_browser.mjs'), '--base', 'http://192.168.4.1', '--out', str(bout)],
-                                   str(bstd), args.browser_budget, str(ROOT))
-                log('browser', exit=brc, stdout=bstd.name, result=bout.name)
-                report['browser'] = 'PASS' if brc == 0 else f'FAIL ({brc})'; browser_ok = brc == 0
-            test_ok = rc == 0 and browser_ok
-            report['e1'] = ('PASS (HTTP/SSE' + (' + browser' if args.browser else ' only') + ')') if test_ok else \
-                'FAIL (' + ', '.join(f'{k} {report[k]}' for k in ('http', 'browser') if k in report and report[k] != 'PASS') + ')'
+            test_ok = run_checks(sy, args.python, args.port, args.node if args.browser else None, args.budget,
+                                 args.browser_budget, out_dir, stamp, report, log)
     except BaseException as e:  # includes Ctrl-C/SIGTERM: fall through to restore
         log('interrupted', error=repr(e)); report['e1'] = f'NOT RUN (interrupted: {e!r})'
     finally:
