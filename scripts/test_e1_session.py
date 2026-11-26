@@ -72,6 +72,18 @@ class Board(NetFake):
             return (1, 'verify DIFFERENT') if changed or self.f['usb_verify'] else (0, 'verify SAME')
         return super().run(cmd, timeout)
     def run_child(self, cmd, stdout_path, timeout, cwd):
+        if any(str(c).endswith('e1_sse_diag.py') for c in cmd):
+            self.calls.append(['child'] + cmd)
+            role = 'old' if self.image == 'old' else 'new'
+            behaviour = self.f.get('sse_' + role, 'PASS')
+            if behaviour == 'timeout': self.t += timeout; return 'timeout'
+            if behaviour == 'nofile': self.t += 5; return 1
+            self.t += 60
+            series = {k: 'PASS' for k in ('setup', 'admission', 'release_fin', 'release_unread', 'release_rst', 'slow', 'fast', 'reconnect')}
+            if behaviour == 'FAIL': series['release_fin'] = 'FAIL'; series.update(slow='SKIP', fast='SKIP', reconnect='SKIP')
+            out = cmd[cmd.index('--out') + 1]
+            Path(out).write_text(json.dumps({'overall': behaviour, 'series': {k: {'outcome': v} for k, v in series.items()}}))
+            return 0 if behaviour == 'PASS' else 1
         if any(str(c).endswith('e1_partial_request.py') for c in cmd):
             self.calls.append(['child'] + cmd)
             if self.f['partial'] == 'timeout': self.t += timeout; Path(stdout_path).write_text(''); return 'timeout'
@@ -381,6 +393,70 @@ class Session(unittest.TestCase):
             self.assertNotIn(pwd, text)
         finally:
             os.umask(old)
+
+
+class SseRoute(unittest.TestCase):
+    def assertRestoredOld(self, b, rep):
+        self.assertEqual(rep['imageLeft'], 'old (rolled back)'); self.assertEqual(b.image, 'old'); self.assertEqual(b.flashes, ['new', 'old'])
+        self.assertEqual(rep['configRestore'], 'CONFIRMED'); self.assertTrue(rep['networkRestore']['confirmed']); self.assertFalse(b.held)
+        self.assertLessEqual(rep['sessionSeconds'], session.SESSION_LIMIT)
+
+    def children(self, b, name): return [c for c in b.calls if c[0] == 'child' and any(str(x).endswith(name) for x in c)]
+
+    def test_both_diagnostics_pass_and_old_image_is_restored(self):
+        b = Board(); code, rep, _ = run(b, {'add': ['--route', 'sse']})
+        self.assertEqual(code, 0)
+        self.assertEqual(rep['sseOld']['overall'], 'PASS'); self.assertEqual(rep['sseNew']['overall'], 'PASS')
+        self.assertEqual(len(self.children(b, 'e1_sse_diag.py')), 2)
+        for name in ('e1_partial_request.py', 'check_p1c_http.py', 'e1_browser.mjs'): self.assertEqual(self.children(b, name), [], name)
+        self.assertRestoredOld(b, rep)
+        steps = [x['step'] for x in rep['steps']]
+        self.assertLess(steps.index('sse-old'), steps.index('flash')); self.assertLess(steps.index('settled'), steps.index('sse-new'))
+
+    def test_failing_new_diagnostic_is_reported_per_series(self):
+        b = Board(sse_new='FAIL'); code, rep, _ = run(b, {'add': ['--route', 'sse']})
+        self.assertEqual(code, 3); self.assertEqual(rep['sseNew']['release_fin'], 'FAIL'); self.assertEqual(rep['sseNew']['slow'], 'SKIP')
+        self.assertEqual(rep['sseOld']['overall'], 'PASS'); self.assertRestoredOld(b, rep)
+
+    def test_diagnostic_without_result_or_timeout_is_not_measured(self):
+        for how in ('nofile', 'timeout'):
+            with self.subTest(how):
+                b = Board(sse_old=how); code, rep, _ = run(b, {'add': ['--route', 'sse']})
+                self.assertIn('not measured', rep['sseOld']); self.assertEqual(code, 3); self.assertRestoredOld(b, rep)
+
+    def test_config_changed_by_flash_stops_before_the_new_diagnostic(self):
+        b = Board(config_changed_by_flash=True); code, rep, _ = run(b, {'add': ['--route', 'sse']})
+        self.assertIn('not measured', rep['sseNew']); self.assertEqual(len(self.children(b, 'e1_sse_diag.py')), 1)
+        self.assertEqual(code, 3); self.assertRestoredOld(b, rep)
+
+    def test_preflight_and_dry_run_unchanged_for_sse_route(self):
+        b = Board(master=True); code, rep, _ = run(b, {'add': ['--route', 'sse']})
+        self.assertEqual(code, 2); self.assertEqual(changes(b), ([], []))
+        b = Board(); code, rep, _ = run(b, {'add': ['--route', 'sse', '--dry-run']})
+        self.assertEqual(code, 0); self.assertEqual(changes(b), ([], []))
+
+    def test_signal_during_the_new_diagnostic_restores_everything(self):
+        b = Board(); real = b.run_child
+        def child(cmd, *a):
+            if any(str(c).endswith('e1_sse_diag.py') for c in cmd) and b.image == 'new': raise KeyboardInterrupt('signal 15')
+            return real(cmd, *a)
+        b.run_child = child
+        code, rep, _ = run(b, {'add': ['--route', 'sse']})
+        self.assertIn('signal 15', rep['interrupted']); self.assertEqual(code, 3); self.assertRestoredOld(b, rep)
+
+    def test_worst_case_durations_stay_within_session_limit(self):
+        class Slow(Board):
+            def run(self, cmd, timeout=30):
+                t0 = self.t; res = super().run(cmd, timeout); self.t += max(0, timeout - (self.t - t0)); return res
+            def run_child(self, cmd, path, timeout, cwd):
+                t0 = self.t; res = super().run_child(cmd, path, timeout, cwd); self.t += max(0, timeout - (self.t - t0)); return res
+            def usb_status(self, h):
+                self.t += 8; return super().usb_status(h)
+        for extra in ({}, {'rejoin': 'hang', 'autojoin': False}):
+            with self.subTest(**extra):
+                b = Slow(**extra); code, rep, _ = run(b, {'add': ['--route', 'sse']})
+                self.assertLessEqual(rep['sessionSeconds'], session.SESSION_LIMIT, rep['steps'][-5:])
+                self.assertNotEqual(code, 0)
 
 
 class Clock:

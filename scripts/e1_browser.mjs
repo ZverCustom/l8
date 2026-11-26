@@ -110,8 +110,29 @@ async function main() {
   const order = allT2(); const iStatus = order.indexOf('GET /api/status'), iApply = order.indexOf('POST /api/apply'), iSave = order.indexOf('POST /api/save');
   const writtenAgain = await waitFor("document.getElementById('dirty').textContent==='Записано'", 5000); const savedLost = await baseline();
   check('explicit Save after lost response: status read before apply and save, 44 saved, "Записано"', iStatus >= 0 && iStatus < iApply && iApply < iSave && writtenAgain && savedLost === 44, {order, savedBaseline: savedLost});
+  // Hidden/visible by a REAL tab switch: in --headless=new, Target.activateTarget of another tab
+  // makes this page hidden (document.visibilityState, visibilitychange), as a user switching tabs.
+  await evaluate("window.__vis=[document.visibilityState];document.addEventListener('visibilitychange',()=>__vis.push(document.visibilityState));true");
+  await move(51, 53, 30); await idle();
+  const leaseOpen = await evaluate('previewOpen===true');
+  const other = (await send('Target.createTarget', {url: 'about:blank'})).targetId;
+  await send('Target.activateTarget', {targetId: other});
+  const hidden = await waitFor('document.hidden===true', 3000, 100);
+  const th = now(); await sleep(12000);  // longer than the ~10 s lease heartbeat
+  const evs = () => [...reqs.values()].filter(r => r.url.includes('/api/events'));
+  const sseOpenWhileHidden = evs().filter(r => r.end === undefined).length;
+  const sentWhileHidden = since(th).length; const newSseWhileHidden = evs().filter(r => r.start >= th).length;
+  const tv = now(); await send('Target.activateTarget', {targetId: target.id});
+  const visible = await waitFor('document.hidden===false', 3000, 100); await sleep(3000);
+  const afterV = [...reqs.values()].filter(r => r.start >= tv).map(r => r.method + ' ' + r.url.replace(BASE, '').split('?')[0]);
+  const iSt = afterV.indexOf('GET /api/status'), iChange = afterV.findIndex(x => /^POST \/api\/(preview|apply|save|discard|touch)$/.test(x));
+  const reopened = afterV.includes('GET /api/events'); const vis = await evaluate('JSON.stringify(window.__vis)');
+  try { await send('Target.closeTarget', {targetId: other}); } catch {}
+  check('hidden/visible tab (real tab switch): hidden stops lease renewal and SSE, visible reads status before any change and reopens SSE',
+        leaseOpen && hidden && visible && sseOpenWhileHidden === 0 && sentWhileHidden === 0 && newSseWhileHidden === 0 && reopened && iSt >= 0 && (iChange < 0 || iSt < iChange),
+        {visibility: vis, leaseOpen, sseOpenWhileHidden, sentWhileHidden, newSseWhileHidden, afterVisible: afterV});
+  await evaluate("(document.getElementById('discardPreview')||document.getElementById('discard'))?.click();true"); await idle();
   check('Master unchanged through the browser run', (await evaluate("(async()=>(await (await fetch('/api/status')).json()).master)()")) === masterBefore, {masterBefore});
-  results.push({name: 'hidden/visible tab', ok: null, note: 'NOT RUN in headless Chrome (visibility cannot be changed reliably); covered by check_ui.mjs'});
 }
 
 let code = 1;

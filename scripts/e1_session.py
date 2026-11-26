@@ -15,6 +15,10 @@ Route:
               firmware = new image, same deviceId, configuration unchanged.
   new         rejoin the AP, the same minimal case (same boot + measured HTTP recovery expected).
   e1          e1_ap_run.run_checks: check_p1c_http.py --ap and e1_browser.mjs.
+  --route sse (P1-016) instead of old/new/e1: e1_sse_diag.py on the old image (it is on the
+              board already), then flash new, settle, verify config, e1_sse_diag.py again;
+              cleanup always flashes the old image back. sseOld/sseNew carry the per-series
+              outcomes; exit 0 only if both diagnostics PASS and cleanup is confirmed.
   cleanup     always, also after errors, timeouts and SIGTERM/SIGHUP/Ctrl-C (ignored while it
               runs): image policy (keep the new image only if the old reset was reproduced,
               the new image did not reset and HTTP recovered, and E1 passed; otherwise flash the
@@ -43,7 +47,8 @@ SESSION_LIMIT = 25 * 60
 USB_READ = 8
 CHANNELS = 8
 # Whole-step limits, including everything inside the step (sleeps, polls, USB reads).
-LIMITS = {'settle': 150, 'usb-config': 60, 'join': 90, 'partial': 75, 'flash': 120}
+LIMITS = {'settle': 150, 'usb-config': 60, 'join': 90, 'partial': 75, 'flash': 120, 'sse': 170}
+SSE_BUDGET = 150  # e1_sse_diag.py own deadline; the child limit adds a margin
 # Cleanup sub-budgets (s): rollback = flash + settle; configuration restore; network restore.
 ROLLBACK_RESERVE = LIMITS['flash'] + LIMITS['settle']
 CONFIG_RESERVE = 75
@@ -131,6 +136,9 @@ def main(argv=None, sy=None, out_dir=None):
     ap.add_argument('--node', default='node')
     ap.add_argument('--esptool', default=str(ESPTOOL))
     ap.add_argument('--dry-run', action='store_true', help='preflight only, then stop')
+    ap.add_argument('--route', choices=['e1', 'sse'], default='e1',
+                    help='e1: WDT compare + HTTP/SSE/browser (P1-013); sse: SSE slot diagnostics on the old image, '
+                         'then on the new one; the old image is always restored (P1-016)')
     args = ap.parse_args(argv)
     os.umask(0o077)
     sy = Budget(raw)
@@ -245,9 +253,36 @@ def main(argv=None, sy=None, out_dir=None):
         ok = bool(st) and st.get('firmware') == version and bool(i) and i.get('deviceId') == args.device_id
         log('settled', expected=version, firmware=st and st.get('firmware'), ok=ok); return ok
 
+    def sse_diag(name, field):
+        if not fits('sse'): report[field] = 'NOT RUN (no time left in the session)'; return None
+        out = out_dir / f'{stamp}-{name}.json'
+        with sy.phase(LIMITS['sse']):
+            rc, _ = child(name, [args.python, str(ROOT / 'scripts/e1_sse_diag.py'), '--base', 'http://192.168.4.1', '--port', args.port,
+                                 '--out', str(out), '--budget', str(SSE_BUDGET)], LIMITS['sse'])
+        try:
+            res = json.loads(Path(out).read_text())
+            report[field] = {'overall': res['overall'], **{k: v['outcome'] for k, v in res['series'].items()}, 'file': out.name}
+        except (OSError, ValueError, KeyError):
+            report[field] = f'not measured (diagnostic exit {rc}, no result file)'
+        return report[field]
+
     new_ok = e1_ok = old_repro = False
     try:
-        if join_ap():
+        if args.route == 'sse':
+            # Diagnostic route: no WDT repeat, no browser; the old image is restored in cleanup.
+            report.update(sseOld='NOT RUN', sseNew='NOT RUN')
+            if join_ap():
+                sse_diag('sse-old', 'sseOld')
+                if fits('flash', 'settle'):
+                    state['flashed'] = True
+                    if flash(args.new, new_m) and settle_as(new_ver):
+                        vcode = usb_cfg('verify', backup)[0] if fits('usb-config') else 'skipped'
+                        log('config-after-flash', same=vcode == 0)
+                        if vcode == 0 and join_ap(): sse_diag('sse-new', 'sseNew')
+                        elif vcode != 0: report['sseNew'] = f'not measured (configuration after flash not verified: {vcode})'
+                    else:
+                        report['sseNew'] = 'not measured (flash or settle failed)'
+        elif join_ap():
             rc, _ = partial('partial-old'); report['oldWdt'] = classify_old(rc); old_repro = rc == 1
             if fits('flash', 'settle'):
                 state['flashed'] = True  # from here the board may hold the new image
@@ -279,10 +314,13 @@ def main(argv=None, sy=None, out_dir=None):
             try: signal.signal(s, signal.SIG_IGN)
             except (ValueError, OSError): pass
         sy.until = deadline
-        cleanup_ok = cleanup(sy, args, state, report, log, old_repro and new_ok and e1_ok, flash, settle_as, old_ver, backup,
+        cleanup_ok = cleanup(sy, args, state, report, log, args.route == 'e1' and old_repro and new_ok and e1_ok, flash, settle_as, old_ver, backup,
                              usb_cfg, gw0, ap_ssid, ap_ssid in known, deadline)
         report['sessionSeconds'] = round(sy.now() - start, 1); save()
-    tests_ok = old_repro and new_ok and e1_ok
+    if args.route == 'sse':
+        tests_ok = all(isinstance(report.get(f), dict) and report[f]['overall'] == 'PASS' for f in ('sseOld', 'sseNew'))
+    else:
+        tests_ok = old_repro and new_ok and e1_ok
     report['result'] = 'PASS' if tests_ok and cleanup_ok else 'see fields'
     save()
     return 0 if tests_ok and cleanup_ok else 5 if not tests_ok and not cleanup_ok else 4 if not cleanup_ok else 3
