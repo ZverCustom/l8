@@ -49,6 +49,31 @@ CHANNELS = 8
 # Whole-step limits, including everything inside the step (sleeps, polls, USB reads).
 LIMITS = {'settle': 150, 'usb-config': 60, 'join': 90, 'partial': 75, 'flash': 120, 'sse': 170}
 SSE_BUDGET = 150  # e1_sse_diag.py own deadline; the child limit adds a margin
+SSE_SERIES = ('setup', 'admission', 'release_fin', 'release_unread', 'release_rst', 'slow', 'fast', 'reconnect')
+SSE_OUTCOMES = {'PASS', 'FAIL', 'SKIP', 'NOT_MEASURED'}
+
+
+def sse_verdict(rc, raw):
+    """Summary of one e1_sse_diag.py run. overall is PASS only for a finished child (exit 0) with
+    a complete result whose own overall matches its series; otherwise FAIL/NOT_MEASURED as the
+    series say, or INVALID with the problems. Partial observations are kept."""
+    problems, outs = [], {}
+    series = raw.get('series') if isinstance(raw, dict) else None
+    if not isinstance(series, dict):
+        problems.append('no series in the result')
+        series = {}
+    for n in SSE_SERIES:
+        v = series.get(n)
+        if v is None: problems.append(f'missing series {n}')
+        elif not isinstance(v, dict) or v.get('outcome') not in SSE_OUTCOMES: problems.append(f'invalid series {n}')
+        else: outs[n] = v['outcome']
+    vals = list(outs.values())
+    computed = 'FAIL' if 'FAIL' in vals else 'PASS' if len(vals) == len(SSE_SERIES) and all(o == 'PASS' for o in vals) else 'NOT_MEASURED'
+    claimed = raw.get('overall') if isinstance(raw, dict) else None
+    if claimed != computed: problems.append(f'overall {claimed!r} does not match the series ({computed})')
+    if rc not in (0, 1): problems.append(f'diagnostic did not finish normally ({rc})')
+    elif (rc == 0) != (computed == 'PASS'): problems.append(f'exit {rc} does not match {computed}')
+    return {'overall': 'INVALID' if problems else computed, **outs, 'exit': rc, **({'problems': problems} if problems else {})}
 # Cleanup sub-budgets (s): rollback = flash + settle; configuration restore; network restore.
 ROLLBACK_RESERVE = LIMITS['flash'] + LIMITS['settle']
 CONFIG_RESERVE = 75
@@ -256,14 +281,17 @@ def main(argv=None, sy=None, out_dir=None):
     def sse_diag(name, field):
         if not fits('sse'): report[field] = 'NOT RUN (no time left in the session)'; return None
         out = out_dir / f'{stamp}-{name}.json'
+        try: out.unlink()  # only a result written by this run counts
+        except OSError: pass
         with sy.phase(LIMITS['sse']):
             rc, _ = child(name, [args.python, str(ROOT / 'scripts/e1_sse_diag.py'), '--base', 'http://192.168.4.1', '--port', args.port,
                                  '--out', str(out), '--budget', str(SSE_BUDGET)], LIMITS['sse'])
         try:
-            res = json.loads(Path(out).read_text())
-            report[field] = {'overall': res['overall'], **{k: v['outcome'] for k, v in res['series'].items()}, 'file': out.name}
-        except (OSError, ValueError, KeyError):
+            raw = json.loads(Path(out).read_text())
+        except (OSError, ValueError):
             report[field] = f'not measured (diagnostic exit {rc}, no result file)'
+            return report[field]
+        report[field] = {**sse_verdict(rc, raw), 'file': out.name}
         return report[field]
 
     new_ok = e1_ok = old_repro = False

@@ -429,6 +429,52 @@ class SseRoute(unittest.TestCase):
         self.assertIn('not measured', rep['sseNew']); self.assertEqual(len(self.children(b, 'e1_sse_diag.py')), 1)
         self.assertEqual(code, 3); self.assertRestoredOld(b, rep)
 
+    def test_child_exit_and_result_completeness_decide_the_verdict(self):
+        full = {k: {'outcome': 'PASS'} for k in session.SSE_SERIES}
+        cases = {
+            'PASS file, then timeout': ({'overall': 'PASS', 'series': full}, 'timeout'),
+            'PASS file, exit 1': ({'overall': 'PASS', 'series': full}, 1),
+            'empty series': ({'overall': 'PASS', 'series': {}}, 0),
+            'one series missing': ({'overall': 'PASS', 'series': {k: v for k, v in full.items() if k != 'reconnect'}}, 0),
+            'overall contradicts series': ({'overall': 'PASS', 'series': {**full, 'slow': {'outcome': 'FAIL'}}}, 0),
+            'wrong types': ({'overall': 'PASS', 'series': {**full, 'fast': 'PASS'}}, 0),
+            'unknown outcome': ({'overall': 'PASS', 'series': {**full, 'fast': {'outcome': 'OK'}}}, 0),
+            'not an object': (['PASS'], 0),
+        }
+        for name, (payload, rc) in cases.items():
+            with self.subTest(name):
+                b = Board(); real = b.run_child
+                def child(cmd, path, timeout, cwd, payload=payload, rc=rc):
+                    if any(str(c).endswith('e1_sse_diag.py') for c in cmd):
+                        real(cmd, path, timeout, cwd)
+                        Path(cmd[cmd.index('--out') + 1]).write_text(json.dumps(payload)); return rc
+                    return real(cmd, path, timeout, cwd)
+                b.run_child = child
+                code, rep, _ = run(b, {'add': ['--route', 'sse']})
+                self.assertEqual(code, 3); self.assertNotEqual(rep['result'], 'PASS')
+                self.assertEqual(rep['sseOld']['overall'], 'INVALID'); self.assertTrue(rep['sseOld']['problems'])
+                self.assertRestoredOld(b, rep)
+
+    def test_incomplete_result_is_invalid_even_if_it_claims_not_measured(self):
+        partial = {k: {'outcome': 'PASS'} for k in session.SSE_SERIES[:3]}
+        v = session.sse_verdict(1, {'overall': 'NOT_MEASURED', 'series': partial})
+        self.assertEqual(v['overall'], 'INVALID'); self.assertTrue(any('missing series' in p for p in v['problems']))
+
+    def test_consistent_fail_is_a_valid_fail_not_invalid(self):
+        b = Board(sse_old='FAIL'); code, rep, _ = run(b, {'add': ['--route', 'sse']})
+        self.assertEqual(rep['sseOld']['overall'], 'FAIL'); self.assertNotIn('problems', rep['sseOld']); self.assertEqual(code, 3)
+
+    def test_stale_result_file_is_not_reused(self):
+        b = Board(); real = b.run_child
+        def child(cmd, path, timeout, cwd):
+            if any(str(c).endswith('e1_sse_diag.py') for c in cmd):
+                self.assertFalse(Path(cmd[cmd.index('--out') + 1]).exists(), 'old result removed before the run')
+                return 'timeout'  # writes nothing
+            return real(cmd, path, timeout, cwd)
+        b.run_child = child
+        code, rep, _ = run(b, {'add': ['--route', 'sse']})
+        self.assertIn('not measured', rep['sseOld']); self.assertEqual(code, 3)
+
     def test_preflight_and_dry_run_unchanged_for_sse_route(self):
         b = Board(master=True); code, rep, _ = run(b, {'add': ['--route', 'sse']})
         self.assertEqual(code, 2); self.assertEqual(changes(b), ([], []))

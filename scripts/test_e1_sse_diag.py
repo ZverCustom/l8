@@ -1,6 +1,6 @@
 """Tests of e1_sse_diag.py against a local controllable TCP server (fake_sse_board.py).
 Real sockets, short time constants; no board, no network change."""
-import socket, time, unittest
+import json, socket, time, unittest
 
 import e1_sse_diag as diag
 from fake_sse_board import FakeSseBoard
@@ -100,6 +100,52 @@ class SseDiag(unittest.TestCase):
         self.assertEqual(a['outcome'], 'FAIL'); self.assertIn('200', a['fourthStatus'])
         self.assertEqual(res['overall'], 'FAIL')
 
+    def early_closer(self, nth, same_read):
+        test = self
+        class EarlyClose(FakeSseBoard):
+            def __init__(self, **kw):
+                self.count = 0; super().__init__(**kw)
+            def _stream(self, c, v1):
+                self.count += 1
+                if self.count != nth: return super()._stream(c, v1)
+                ev = 'event: status\ndata: ' + json.dumps({'v': 1, 'bootId': self.boot, 'seq': 1, 'status': {}}) + '\n\n'
+                self._send(c, b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n' + ev.encode())
+                if not same_read: time.sleep(0.3)
+                c.shutdown(socket.SHUT_WR)
+                return self._free('closed-early')
+        b = EarlyClose(); test.boards.append(b); return b
+
+    def test_slow_subscriber_closed_before_the_hold_is_a_preparation_failure(self):
+        for same_read in (True, False):
+            with self.subTest(same_read=same_read):
+                b = self.early_closer(7, same_read); res = run(b)  # 7th accepted stream = the slow subscriber
+                o = outcomes(res)
+                self.assertEqual(o['slow'], 'FAIL', res['series']['slow']); self.assertIn('preparation', res['series']['slow']['reason'])
+                self.assertEqual(o['fast'], 'SKIP'); self.assertEqual(o['reconnect'], 'SKIP'); self.assertEqual(res['overall'], 'FAIL')
+                self.assertIn('closed-early', b.closes)
+
+    def test_member_closed_right_after_acceptance_fails_setup(self):
+        b = self.early_closer(1, True); res = run(b)
+        self.assertEqual(outcomes(res)['setup'], 'FAIL')
+        self.assertTrue(any('closed' in c['reason'] for c in res['series']['setup']['clients'].values()))
+
+    def test_usb_answers_missing_error_or_changed(self):
+        cases = {
+            'both missing': (lambda: None, 'usbProblem'),
+            'one missing': (iter([None] + ['b' * 32] * 99).__next__, 'usbProblem'),
+            'error': (lambda: (_ for _ in ()).throw(TimeoutError('no answer')), 'usbProblem'),
+            'changed': (iter(['b' * 32, 'c' * 32] + ['c' * 32] * 99).__next__, 'reset'),
+        }
+        for name, (cb, key) in cases.items():
+            with self.subTest(name):
+                b = self.board(); res = run(b, usb_boot=cb)
+                setup = res['series']['setup']
+                self.assertEqual(setup['outcome'], 'NOT_MEASURED'); self.assertIn(key, setup)
+                if key == 'usbProblem': self.assertNotIn('reset', setup)
+                self.assertNotEqual(res['overall'], 'PASS')
+        b = self.board(); res = run(b, usb_boot=lambda left: b.boot)
+        self.assertEqual(res['overall'], 'PASS'); self.assertEqual(res['series']['setup']['usb']['before'], ['ok', b.boot])
+
     def test_too_few_slots_fails_setup(self):
         b = self.board(slots=2); res = run(b)
         self.assertEqual(outcomes(res)['setup'], 'FAIL'); self.assertEqual(outcomes(res)['admission'], 'SKIP')
@@ -115,7 +161,7 @@ class SseDiag(unittest.TestCase):
 
     def test_reset_seen_over_usb_marks_series_not_measured(self):
         b = self.board(); boots = iter([b.boot, b.boot, b.boot, 'c' * 32] + ['c' * 32] * 40)
-        res = run(b, usb_boot=lambda: next(boots))
+        res = run(b, usb_boot=lambda left: next(boots))
         self.assertEqual(res['series']['setup']['outcome'], 'PASS')
         self.assertEqual(res['series']['admission']['outcome'], 'NOT_MEASURED'); self.assertIn('reset', res['series']['admission'])
         self.assertNotEqual(res['overall'], 'PASS')
@@ -130,6 +176,95 @@ class SseDiag(unittest.TestCase):
         b = self.board(); b.stop(); time.sleep(0.1)
         res = run(b, budget=5)
         self.assertEqual(outcomes(res)['setup'], 'FAIL'); self.assertTrue(res['allClosed'])
+
+
+class MainDeadline(unittest.TestCase):
+    """R25: production main() honours one overall deadline, including preflight, USB and cleanup."""
+    def setUp(self):
+        import tempfile
+        self.out = tempfile.mkdtemp() + '/r.json'
+
+    def result(self):
+        with open(self.out) as f: return json.load(f)
+
+    def test_dripping_http_preflight_is_cut_at_the_budget(self):
+        srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen(1); port = srv.getsockname()[1]
+        import threading
+        def drip():
+            c, _ = srv.accept()
+            with c:
+                c.recv(4096)
+                for _ in range(100):
+                    try: c.sendall(b'x')
+                    except OSError: break
+                    time.sleep(0.05)
+        threading.Thread(target=drip, daemon=True).start()
+        t = time.monotonic(); code = diag.main(['--base', f'http://127.0.0.1:{port}', '--budget', '0.3', '--out', self.out])
+        self.assertLess(time.monotonic() - t, 0.8); self.assertEqual(code, 1)
+        r = self.result(); self.assertEqual(r['overall'], 'NOT_MEASURED'); self.assertIn('TimeoutError', r['error'])
+        srv.close()
+
+    def test_silent_http_preflight_is_cut_at_the_budget(self):
+        srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen(1); port = srv.getsockname()[1]
+        import threading
+        def silent():
+            c, _ = srv.accept(); c.recv(4096); time.sleep(3); c.close()
+        threading.Thread(target=silent, daemon=True).start()
+        t = time.monotonic(); diag.main(['--base', f'http://127.0.0.1:{port}', '--budget', '0.3', '--out', self.out])
+        self.assertLess(time.monotonic() - t, 0.8); self.assertIn('Timeout', self.result()['error'])
+        srv.close()
+
+    def test_silent_usb_is_bounded_reported_and_closed(self):
+        import sys, types
+        closed = []
+        class Silent:
+            def __init__(self): self.port = self.baudrate = self.timeout = self.dtr = self.rts = None
+            def open(self): pass
+            def reset_input_buffer(self): pass
+            def write(self, b): pass
+            def flush(self): pass
+            def readline(self): time.sleep(0.05); return b''
+            def close(self): closed.append(True)
+        sys.modules['serial'] = types.SimpleNamespace(Serial=Silent)
+        b = FakeSseBoard()
+        try:
+            t = time.monotonic(); code = diag.main(['--base', f'http://127.0.0.1:{b.port}', '--port', 'X', '--budget', '4', '--out', self.out])
+            elapsed = time.monotonic() - t
+        finally:
+            b.stop(); del sys.modules['serial']
+        r = self.result()
+        self.assertLess(elapsed, 4.8); self.assertEqual(code, 1); self.assertEqual(closed, [True])
+        self.assertEqual(r['usbCheck'], 'enabled'); self.assertNotEqual(r['overall'], 'PASS')
+        self.assertIn('usbProblem', r['series']['setup'])
+
+    def test_deadline_during_the_series_is_honest_and_closes_everything(self):
+        b = FakeSseBoard()
+        try:
+            t = time.monotonic(); code = diag.main(['--base', f'http://127.0.0.1:{b.port}', '--budget', '9', '--out', self.out])
+            elapsed = time.monotonic() - t
+        finally:
+            b.stop()
+        r = self.result()
+        self.assertLess(elapsed, 9.8); self.assertEqual(code, 1); self.assertNotEqual(r['overall'], 'PASS')
+        self.assertIn('NOT_MEASURED', [v['outcome'] for v in r['series'].values()])
+        self.assertTrue(r['allClosed'])
+
+    def test_one_poll_reads_a_bounded_amount_of_a_continuous_stream(self):
+        srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen(1)
+        import threading
+        stop = []
+        def flood():
+            c, _ = srv.accept()
+            c.sendall(b'HTTP/1.1 200 OK\r\n\r\n')
+            while not stop:
+                try: c.sendall(b'x' * 65536)
+                except OSError: break
+        threading.Thread(target=flood, daemon=True).start()
+        s = socket.create_connection(srv.getsockname()); conn = diag.Sse('f', s, time.monotonic)
+        time.sleep(0.5)
+        conn.poll()
+        self.assertLessEqual(len(conn.buf) + len(conn.head or b''), 256 * 1024, 'one pass is bounded, independent of the constant')
+        stop.append(1); s.close(); srv.close()
 
 
 if __name__ == '__main__':
