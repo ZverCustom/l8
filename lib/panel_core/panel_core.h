@@ -60,8 +60,13 @@ struct VehicleView {
   uint8_t speed = 0;  // km/h
   uint8_t throttle = 0;
   int8_t temp = 0;  // coolant °C
-  uint32_t lastUpdate = 0;  // m of rpm (L8 ms), 0 = no data
+  uint32_t lastUpdate = 0;  // m of rpm (L8 ms), 0 = no data; the existing 3 s rule reads it
+  // §14.4 visible freshness per field (now - m <= 300): bit 0 rpm, 1 speed, 2 throttle, 3 temp.
+  // speed/throttle/temp that are not fresh are 0 (README, task 028); rpm keeps its value for
+  // engineRunning() and needs kFreshRpm for scales.
+  uint8_t fresh = 0;
 };
+constexpr uint8_t kFreshRpm = 1, kFreshSpeed = 2, kFreshThrottle = 4, kFreshTemp = 8;
 
 class PanelCore {
  public:

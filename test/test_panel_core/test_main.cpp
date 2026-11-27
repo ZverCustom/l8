@@ -502,6 +502,97 @@ static void test_c7_vehicle_view_matches_existing_rule() {
   TEST_ASSERT_FALSE(existingFresh(z.core->panelVehicle(5000), 5000));
 }
 
+
+// ---- 028 (R71): freshness per field in the view -----------------------------------------
+
+static CanFrame vehSlow(uint8_t coolant, uint8_t oil, uint8_t gear, uint8_t ign, uint8_t valid, uint8_t age, uint8_t seq) {
+  CanFrame f;
+  f.id = panel_rx::kIdVehSlow;
+  uint8_t d[8] = {coolant, oil, gear, ign, valid, age, seq, 0};
+  memcpy(f.data, d, 8);
+  return f;
+}
+
+static void test_v1_reviewer_scenario_stale_fields_are_not_current() {
+  World w;
+  w.feed(vehFast(2500, 0x07, 1, 1));                   // rpm, 52.3 km/h, 17 %
+  w.feed(vehSlow(140, 120, 3, 1, 0x0F, 1, 1));         // coolant 100 °C, oil, gear, ign
+  VehicleView v = w.core->panelVehicle(w.now);
+  TEST_ASSERT_EQUAL(52, v.speed);
+  TEST_ASSERT_EQUAL(17, v.throttle);
+  TEST_ASSERT_EQUAL(100, v.temp);
+  TEST_ASSERT_EQUAL(kFreshRpm | kFreshSpeed | kFreshThrottle | kFreshTemp, v.fresh);
+  uint8_t seq = 2;
+  for (int i = 0; i < 250; i++) {  // 5 s, only rpm valid
+    w.now += 20;
+    w.feed(vehFast(2600, 0x01, 1, seq++));
+  }
+  v = w.core->panelVehicle(w.now);
+  TEST_ASSERT_EQUAL(0, v.speed);
+  TEST_ASSERT_EQUAL(0, v.throttle);
+  TEST_ASSERT_EQUAL(0, v.temp);
+  TEST_ASSERT_EQUAL(kFreshRpm, v.fresh);
+  TEST_ASSERT_EQUAL(2600, v.rpm);
+  TEST_ASSERT_TRUE(w.now - v.lastUpdate <= 20);
+  TEST_ASSERT_TRUE(existingRunning(v, w.now));
+  // panel_rx agrees: the old fields are 5 s old
+  TEST_ASSERT_FALSE(w.core->panel().fresh(panel_rx::kSpeed, w.now));
+  TEST_ASSERT_TRUE(w.core->panel().ageMs(panel_rx::kSpeed, w.now) >= 5000);
+}
+
+static void test_v2_boundaries_300_301_for_every_field() {
+  for (int i = 0; i < 7; i++) {
+    World w;
+    uint8_t age = 2;  // m = now - 8 - 10
+    if (i < 3) w.feed(vehFast(1234, uint8_t(1 << i), age, 1));
+    else w.feed(vehSlow(i == 3 ? 130 : 0xFF, i == 4 ? 130 : 0xFF, i == 5 ? 4 : 0xFF, i == 6 ? 1 : 0xFF, uint8_t(1 << (i - 3)), age, 1));
+    panel_rx::Field f = panel_rx::Field(i);
+    uint32_t m = w.core->panel().field(f).m;
+    TEST_ASSERT_EQUAL_UINT32(w.now - 18, m);
+    TEST_ASSERT_TRUE(w.core->panel().fresh(f, m + 300));
+    TEST_ASSERT_FALSE(w.core->panel().fresh(f, m + 301));
+    const uint8_t bit[7] = {kFreshRpm, kFreshSpeed, kFreshThrottle, kFreshTemp, 0, 0, 0};
+    if (!bit[i]) continue;
+    VehicleView a = w.core->panelVehicle(m + 300), b = w.core->panelVehicle(m + 301);
+    TEST_ASSERT_EQUAL(bit[i], a.fresh & bit[i]);
+    TEST_ASSERT_EQUAL(0, b.fresh & bit[i]);
+    if (i == 1) {
+      TEST_ASSERT_EQUAL(0, b.speed);
+      TEST_ASSERT_EQUAL(52, a.speed);  // vehFast carries 52.3 km/h
+    }
+    if (i == 2) {
+      TEST_ASSERT_EQUAL(0, b.throttle);
+      TEST_ASSERT_EQUAL(17, a.throttle);
+    }
+    if (i == 3) {
+      TEST_ASSERT_EQUAL(0, b.temp);
+      TEST_ASSERT_EQUAL(90, a.temp);
+    }
+    if (i == 0) {  // rpm keeps its value and the 3 s rule past 300 ms
+      TEST_ASSERT_EQUAL(1234, b.rpm);
+      TEST_ASSERT_TRUE(existingRunning(b, m + 301));
+      TEST_ASSERT_TRUE(existingRunning(w.core->panelVehicle(m + 3000), m + 3000));
+      TEST_ASSERT_FALSE(existingRunning(w.core->panelVehicle(m + 3001), m + 3001));
+    }
+  }
+}
+
+static void test_v3_fresh_speed_does_not_extend_rpm() {
+  World w;
+  w.feed(vehFast(2500, 0x01, 1, 1));
+  uint32_t lu = w.core->panelVehicle(w.now).lastUpdate;
+  uint8_t seq = 2;
+  for (int i = 0; i < 200; i++) {
+    w.now += 20;
+    w.feed(vehFast(0, 0x02, 1, seq++));
+  }
+  VehicleView v = w.core->panelVehicle(w.now);
+  TEST_ASSERT_EQUAL_UINT32(lu, v.lastUpdate);
+  TEST_ASSERT_TRUE(v.fresh & kFreshSpeed);
+  TEST_ASSERT_FALSE(v.fresh & kFreshRpm);
+  TEST_ASSERT_FALSE(existingRunning(v, w.now));
+}
+
 // ---- C8: bad input ----------------------------------------------------------------------
 
 static void test_c8_fuzz_never_dispatches_from_garbage() {
@@ -550,6 +641,9 @@ int main() {
   RUN_TEST(test_c6_hello_timeout_starts_over);
   RUN_TEST(test_c6_not_ready_request_not_executed);
   RUN_TEST(test_c7_vehicle_view_matches_existing_rule);
+  RUN_TEST(test_v1_reviewer_scenario_stale_fields_are_not_current);
+  RUN_TEST(test_v2_boundaries_300_301_for_every_field);
+  RUN_TEST(test_v3_fresh_speed_does_not_extend_rpm);
   RUN_TEST(test_c8_fuzz_never_dispatches_from_garbage);
   RUN_TEST(test_c9_sizes);
   return UNITY_END();

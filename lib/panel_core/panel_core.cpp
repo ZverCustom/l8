@@ -302,18 +302,27 @@ void PanelCore::singleShotResult(SingleShot r, uint32_t now) {
 }
 
 VehicleView PanelCore::panelVehicle(uint32_t now) const {
-  (void)now;
+  using namespace panel_rx;
   VehicleView v;
-  const panel_rx::FieldVal& rpm = rxPanel_.field(panel_rx::kRpm);
-  if (!rpm.has) return v;
-  v.rpm = rpm.value;
-  v.lastUpdate = rpm.m ? rpm.m : rpm.m - 1;  // 0 means "no data" to the existing rule; older, not younger
-  const panel_rx::FieldVal& sp = rxPanel_.field(panel_rx::kSpeed);
-  if (sp.has) v.speed = uint8_t(sp.value / 10 > 255 ? 255 : sp.value / 10);
-  const panel_rx::FieldVal& th = rxPanel_.field(panel_rx::kThrottle);
-  if (th.has) v.throttle = uint8_t(th.value);
-  const panel_rx::FieldVal& co = rxPanel_.field(panel_rx::kCoolant);
-  if (co.has) v.temp = int8_t(int(co.value) - 40);
+  const FieldVal& rpm = rxPanel_.field(kRpm);
+  if (rpm.has) {
+    v.rpm = rpm.value;
+    v.lastUpdate = rpm.m ? rpm.m : rpm.m - 1;  // 0 means "no data" to the existing rule; older, not younger
+    if (rxPanel_.fresh(kRpm, now)) v.fresh |= kFreshRpm;
+  }
+  if (rxPanel_.fresh(kSpeed, now)) {
+    uint16_t s = rxPanel_.field(kSpeed).value / 10;
+    v.speed = uint8_t(s > 255 ? 255 : s);
+    v.fresh |= kFreshSpeed;
+  }
+  if (rxPanel_.fresh(kThrottle, now)) {
+    v.throttle = uint8_t(rxPanel_.field(kThrottle).value);
+    v.fresh |= kFreshThrottle;
+  }
+  if (rxPanel_.fresh(kCoolant, now)) {
+    v.temp = int8_t(int(rxPanel_.field(kCoolant).value) - 40);
+    v.fresh |= kFreshTemp;
+  }
   return v;
 }
 
