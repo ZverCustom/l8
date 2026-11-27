@@ -35,12 +35,14 @@ corpus `test/test_zmb/corpus_v1.txt` and against each other (d7-d10
     side, generations (`panelGen`, own bootTag; HELLO: bootTag = bootId[0..4] and MAC of
     the assigned src in deviceId). Only then the `Message` event;
   - the ACK comes in the same output and **must be queued before the handler runs**;
-  - **credit:** a FLOW CTS is only a candidate when formed (`reply` / `pendingFlow`).
-    The block becomes acceptable only after `confirmFlow(frame, now)` with that very
-    frame, i.e. once it is really transmitted. A held, refused or stale CTS (superseded,
-    timed out) grants nothing. XDATA beyond the granted block → RABORT OVERFLOW, no
-    message. While our CTS waits, the assembly lives N_Bs (the sender gives up then);
-    after it, N_Cr;
+  - **credit:** a FLOW CTS is only a candidate when formed: `reply` + a local
+    `FlowTicket` in `out.flow` (also `pendingFlow(frame, ticket)`). CTS frames of two
+    assemblies can be byte-identical (same tid, another CRC or panelGen); their tickets
+    never are. The block becomes acceptable only after `confirmFlow(ticket, now)` of the
+    **current** candidate. A held, refused, repeated or stale ticket (superseded, timed out,
+    another generation) grants nothing and changes nothing — not the current candidate,
+    not its timer. XDATA beyond the granted block → RABORT OVERFLOW, no message. While our
+    CTS waits, the assembly lives N_Bs (the sender gives up then); after it, N_Cr;
   - a delayed copy of the XSTART just delivered (same context and generations, within
     `kDupWindowMs` = 1 s) is ignored: no ACK, no FLOW, no second delivery. A new
     generation, another context, or after 1 s (tid reuse is legal after 60 s) → a fresh
@@ -57,12 +59,18 @@ corpus `test/test_zmb/corpus_v1.txt` and against each other (d7-d10
 - No allocation, no sleeps:
   - `Sender` reads the caller's message in place (keep it alive until the outcome);
   - `Receiver` writes only into the caller's buffer.
-- Sizes (host, 64-bit): `Sender` 56 bytes, `Receiver` 104 bytes + the caller buffer.
+- Sizes (host, 64-bit): `Sender` 56 bytes, `Receiver` 112 bytes + the caller buffer.
 
 ## What a future adapter must confirm
 
 `confirm()` / `confirmFlow()` only after the frame is really in the transmit path (TWAI
 queue / CAN_TX).
+
+FLOW order for the adapter: keep the ticket with the queued CTS; right before writing it,
+`isCurrent(ticket)` — if false, drop it unsent (even when its bytes equal the current
+candidate); after the write is accepted, `confirmFlow(ticket, now)`. A late callback with
+an old ticket returns false and leaves the new assembly untouched. Tickets are a wrapping
+`uint32` counter per receiver (0 never issued).
 The last XDATA's confirm is the irreversibility boundary of §12. A refused or dropped
 frame → `refuse()`, never `confirm()`.
 

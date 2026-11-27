@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
       RxOutput r = rx.onFrame(f, ctx, now);
       if (r.hasReply) {
         printFrame(r.reply);  // written to the bus: the ACK before the message is handed out
-        rx.confirmFlow(r.reply, now);  // a CTS grants credit only now that it is transmitted
+        if (r.flow) rx.confirmFlow(r.flow, now);  // a CTS grants credit only now that it is transmitted
       }
       if (r.event.kind == RxKind::Message) {
         printf("M ");

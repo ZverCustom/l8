@@ -288,18 +288,15 @@ CanFrame Receiver::reply(const RxContext& ctx, uint16_t tid, const TFrame& t) co
   return build(ctx.local, peer_, uint8_t(tid & 0xFF), t);
 }
 
-bool Receiver::pendingFlow(CanFrame& out) const {
+bool Receiver::pendingFlow(CanFrame& out, FlowTicket& ticket) const {
   if (!active_ || !havePending_) return false;
   out = pending_;
+  ticket = pendingTicket_;
   return true;
 }
 
-static bool sameFrame(const CanFrame& a, const CanFrame& b) {
-  return a.id == b.id && a.extended == b.extended && a.rtr == b.rtr && a.dlc == b.dlc && memcmp(a.data, b.data, 8) == 0;
-}
-
-bool Receiver::confirmFlow(const CanFrame& f, uint32_t now) {
-  if (!active_ || !havePending_ || !sameFrame(f, pending_)) return false;
+bool Receiver::confirmFlow(FlowTicket t, uint32_t now) {
+  if (!isCurrent(t)) return false;
   havePending_ = false;
   uint16_t left = uint16_t(last_ - expected_ + 1);
   credit_ = block_ < left ? block_ : left;
@@ -335,9 +332,9 @@ RxOutput Receiver::onFrame(const CanFrame& f, const RxContext& ctx, uint32_t now
       return out;
     }
     active_ = true; tid_ = t.tid; len_ = t.len; crc_ = t.crc; expected_ = 1; last_ = uint16_t((t.len + 5) / 6); credit_ = 0;
-    pending_ = reply(ctx, t.tid, flowFrame(t.tid, flow::kCts, block_, stmin_, 1)); havePending_ = true;
+    pending_ = reply(ctx, t.tid, flowFrame(t.tid, flow::kCts, block_, stmin_, 1)); havePending_ = true; pendingTicket_ = newTicket();
     deadline_ = now + kNBsMs;  // our CTS not transmitted yet: the sender gives up after N_Bs
-    out.hasReply = true; out.reply = pending_;
+    out.hasReply = true; out.reply = pending_; out.flow = pendingTicket_;
     return out;
   }
   if (t.kind == Kind::XData) {
@@ -371,9 +368,9 @@ RxOutput Receiver::onFrame(const CanFrame& f, const RxContext& ctx, uint32_t now
       return out;
     }
     if (credit_ == 0) {
-      pending_ = reply(ctx, tid_, flowFrame(tid_, flow::kCts, block_, stmin_, expected_)); havePending_ = true;
+      pending_ = reply(ctx, tid_, flowFrame(tid_, flow::kCts, block_, stmin_, expected_)); havePending_ = true; pendingTicket_ = newTicket();
       deadline_ = now + kNBsMs;
-      out.hasReply = true; out.reply = pending_;
+      out.hasReply = true; out.reply = pending_; out.flow = pendingTicket_;
     }
     return out;
   }

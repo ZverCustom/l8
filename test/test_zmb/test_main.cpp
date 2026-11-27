@@ -81,7 +81,7 @@ struct Link {
       RxOutput o = rx.onFrame(f, ctx, now);
       if (o.event.kind != RxKind::None) events.push_back(o.event);
       if (o.hasReply) {
-        rx.confirmFlow(o.reply, now);  // the harness is the lower layer: on the bus = transmitted
+        if (o.flow) rx.confirmFlow(o.flow, now);  // the harness is the lower layer: on the bus = transmitted
         bus.push_back(o.reply);
         TxOutcome r = tx.onFrame(o.reply, now);
         if (r.result != TxResult::None) out = r;
@@ -175,7 +175,7 @@ static void test_seq_gap_duplicate_corruption() {
         RxOutput o = l.rx.onFrame(f, l.ctx, l.now);
         AddrId a; TFrame t; parse(f, a, t);
         if (rep == 1) silent = silent || (t.kind == Kind::XData && t.seq == 3 && !o.hasReply && o.event.kind == RxKind::None);
-        if (o.hasReply) { l.rx.confirmFlow(o.reply, l.now); TxOutcome r = l.tx.onFrame(o.reply, l.now); if (r.result != TxResult::None) l.out = r; }
+        if (o.hasReply) { if (o.flow) l.rx.confirmFlow(o.flow, l.now); TxOutcome r = l.tx.onFrame(o.reply, l.now); if (r.result != TxResult::None) l.out = r; }
         if (!(t.kind == Kind::XData && t.seq == 3)) break;
       }
     }
@@ -302,7 +302,7 @@ static void test_timers_cancel_generation_wrap() {
   TEST_ASSERT_EQUAL(int(RxKind::TimedOut), int(r.tick(99).kind));
   // after the CTS is transmitted the pause between XDATA is N_Cr
   RxOutput c0 = r.onFrame(build(0, 1, 1, xstart(180, 1, 0)), moduleCtx(), 0xFFFFFFFFu - 50);
-  TEST_ASSERT_TRUE(r.confirmFlow(c0.reply, 0xFFFFFFFFu - 50));
+  TEST_ASSERT_TRUE(r.confirmFlow(c0.flow, 0xFFFFFFFFu - 50));
   TEST_ASSERT_EQUAL(int(RxKind::None), int(r.tick(0xFFFFFFFFu).kind));
   TEST_ASSERT_EQUAL(int(RxKind::TimedOut), int(r.tick(49).kind));
   auto small = message(MsgType::Request, 2, 0, 0, {'{', '}'});
@@ -379,7 +379,7 @@ static void test_r44_credit_only_from_transmitted_cts() {
   {  // initial CTS formed but not transmitted
     Receiver rx(0, rxbuf, sizeof rxbuf);
     RxOutput o = rx.onFrame(f[0], ctx, 0);
-    CanFrame p; TEST_ASSERT_TRUE(rx.pendingFlow(p));
+    CanFrame p; FlowTicket pt; TEST_ASSERT_TRUE(rx.pendingFlow(p, pt)); TEST_ASSERT_EQUAL(o.flow, pt);
     o = rx.onFrame(f[1], ctx, 0);
     TEST_ASSERT_EQUAL(int(RxKind::Aborted), int(o.event.kind));
     TEST_ASSERT_EQUAL(reason::kOverflow, o.event.code);
@@ -390,11 +390,11 @@ static void test_r44_credit_only_from_transmitted_cts() {
   {  // next CTS held: XDATA 17.. refused, nothing delivered; asking again grants nothing
     Receiver rx(0, rxbuf, sizeof rxbuf);
     RxOutput o = rx.onFrame(f[0], ctx, 0);
-    TEST_ASSERT_TRUE(rx.confirmFlow(o.reply, 0));
+    TEST_ASSERT_TRUE(rx.confirmFlow(o.flow, 0));
     CanFrame next; bool formed = false;
     for (int i = 1; i <= 16; i++) { o = rx.onFrame(f[i], ctx, 0); if (o.hasReply) { next = o.reply; formed = true; } }
     TEST_ASSERT_TRUE(formed);
-    for (int k = 0; k < 3; k++) { CanFrame p; TEST_ASSERT_TRUE(rx.pendingFlow(p)); }
+    for (int k = 0; k < 3; k++) { CanFrame p; FlowTicket pt; TEST_ASSERT_TRUE(rx.pendingFlow(p, pt)); }
     o = rx.onFrame(f[17], ctx, 0);
     TEST_ASSERT_EQUAL(int(RxKind::Aborted), int(o.event.kind));
     TEST_ASSERT_EQUAL(reason::kOverflow, o.event.code);
@@ -405,22 +405,24 @@ static void test_r44_credit_only_from_transmitted_cts() {
   {  // refused, then transmitted: completes; an old CTS grants nothing
     Receiver rx(0, rxbuf, sizeof rxbuf);
     rx.onFrame(f[0], ctx, 0);
-    CanFrame first; TEST_ASSERT_TRUE(rx.pendingFlow(first));
+    CanFrame ff; FlowTicket first, second;
+    TEST_ASSERT_TRUE(rx.pendingFlow(ff, first));
     TEST_ASSERT_TRUE(rx.confirmFlow(first, 5));
     for (int i = 1; i <= 16; i++) rx.onFrame(f[i], ctx, 5);
-    CanFrame second; TEST_ASSERT_TRUE(rx.pendingFlow(second));
+    TEST_ASSERT_TRUE(rx.pendingFlow(ff, second));
     TEST_ASSERT_FALSE(rx.confirmFlow(first, 6));
     TEST_ASSERT_TRUE(rx.confirmFlow(second, 30));
+    TEST_ASSERT_FALSE(rx.confirmFlow(second, 31));  // the same confirmation twice
     bool delivered = false;
     for (size_t i = 17; i < f.size(); i++) delivered = delivered || isMessage(rx.onFrame(f[i], ctx, 30));
     TEST_ASSERT_TRUE(delivered);
   }
   {  // stale CTS after supersede or timeout
     Receiver rx(0, rxbuf, sizeof rxbuf);
-    CanFrame old = rx.onFrame(build(0, 1, 1, xstart(60, 1, 0)), ctx, 0).reply;
+    FlowTicket old = rx.onFrame(build(0, 1, 1, xstart(60, 1, 0)), ctx, 0).flow;
     rx.onFrame(build(0, 1, 2, xstart(60, 2, 0)), ctx, 1);
     TEST_ASSERT_FALSE(rx.confirmFlow(old, 2));
-    CanFrame cur; TEST_ASSERT_TRUE(rx.pendingFlow(cur));
+    CanFrame cf; FlowTicket cur; TEST_ASSERT_TRUE(rx.pendingFlow(cf, cur));
     rx.tick(1 + kNBsMs);
     TEST_ASSERT_FALSE(rx.busy());
     TEST_ASSERT_FALSE(rx.confirmFlow(cur, 200));
@@ -433,7 +435,7 @@ static void test_r44_full_size_with_deferred_grants() {
   Receiver rx(0, rxbuf, sizeof rxbuf);
   RxContext ctx = moduleCtx();
   TEST_ASSERT_TRUE(tx.start(big.data(), big.size(), 0x0400));
-  uint32_t now = 0; bool held = false; CanFrame h; TxOutcome out; bool msg = false;
+  uint32_t now = 0; bool held = false; CanFrame h; FlowTicket ht = 0; TxOutcome out; bool msg = false;
   for (int i = 0; i < 20000; i++) {
     now++;
     CanFrame f;
@@ -443,12 +445,13 @@ static void test_r44_full_size_with_deferred_grants() {
       if (isMessage(o)) msg = o.event.len == kMaxMessage;
       if (o.hasReply) {
         AddrId a; TFrame t; parse(o.reply, a, t);
-        if (t.kind == Kind::Flow && t.status == flow::kCts) { held = true; h = o.reply; }
+        if (t.kind == Kind::Flow && t.status == flow::kCts) { held = true; h = o.reply; ht = o.flow; }
         else { TxOutcome r = tx.onFrame(o.reply, now); if (r.result != TxResult::None) out = r; }
       }
     } else if (held) {
       held = false;
-      TEST_ASSERT_TRUE(rx.confirmFlow(h, now));
+      TEST_ASSERT_TRUE(rx.isCurrent(ht));
+      TEST_ASSERT_TRUE(rx.confirmFlow(ht, now));
       tx.onFrame(h, now);
     } else {
       break;
@@ -501,11 +504,12 @@ static void test_r45_unknown_codes_and_tid8() {
   bad.id ^= 1;
   RxOutput r = rx.onFrame(bad, ctx, 0);
   TEST_ASSERT_FALSE(r.hasReply); TEST_ASSERT_EQUAL(int(RxKind::None), int(r.event.kind)); TEST_ASSERT_FALSE(rx.busy());
-  CanFrame cts = rx.onFrame(build(0, 1, 8, xstart(60, 8, 0)), ctx, 0).reply;
+  RxOutput live = rx.onFrame(build(0, 1, 8, xstart(60, 8, 0)), ctx, 0);
   r = rx.onFrame(bad, ctx, 1);
   TEST_ASSERT_EQUAL(int(RxKind::None), int(r.event.kind));
-  CanFrame p; TEST_ASSERT_TRUE(rx.pendingFlow(p));
-  TEST_ASSERT_EQUAL_MEMORY(cts.data, p.data, 8);
+  CanFrame p; FlowTicket pt; TEST_ASSERT_TRUE(rx.pendingFlow(p, pt));
+  TEST_ASSERT_EQUAL_MEMORY(live.reply.data, p.data, 8);
+  TEST_ASSERT_EQUAL(live.flow, pt);
   CanFrame ab = build(0, 1, 8, abortFrame(Kind::XAbort, 8, reason::kCancel));
   ab.id ^= 3;
   TEST_ASSERT_EQUAL(int(RxKind::None), int(rx.onFrame(ab, ctx, 2).event.kind));
@@ -546,6 +550,85 @@ static void test_r46_cache_context_and_expiry() {
   }
 }
 
+// ---- R44 (U3-004): a CTS is identified by its local ticket, never by its bytes ----
+
+static RxOutput start7(Receiver& rx, const RxContext& c, uint16_t len, uint32_t crc, uint32_t now) {
+  return rx.onFrame(build(0, 1, 7, xstart(len, 7, crc)), c, now);
+}
+
+static bool sameBytes(const CanFrame& a, const CanFrame& b) { return a.id == b.id && memcmp(a.data, b.data, 8) == 0; }
+
+// feeds XDATA [from, to) of m with tid 7; returns the last event kind / code seen
+static RxEvent feed(Receiver& rx, const RxContext& c, const std::vector<uint8_t>& m, size_t from, size_t to, uint32_t now) {
+  RxEvent last;
+  for (size_t k = from; k < to && k * 6 < m.size(); k++) {
+    uint8_t b[6] = {0};
+    memcpy(b, m.data() + k * 6, m.size() - k * 6 < 6 ? m.size() - k * 6 : 6);
+    RxOutput o = rx.onFrame(build(0, 1, 7, xdata(uint16_t(k + 1), b)), c, now);
+    if (o.event.kind != RxKind::None) last = o.event;
+  }
+  return last;
+}
+
+static void test_r44_ticket_identity() {
+  RxContext ctx = moduleCtx();
+  {  // same-tid supersede: identical bytes, the old ticket does not confirm the new one
+    auto m = message(MsgType::Request, 7, 0, 0, std::vector<uint8_t>(40, ' '));
+    Receiver rx(0, rxbuf, sizeof rxbuf);
+    RxOutput a = start7(rx, ctx, uint16_t(m.size()), 123, 0);
+    RxOutput b = start7(rx, ctx, uint16_t(m.size()), crc32(m.data(), m.size()), 1);
+    TEST_ASSERT_TRUE(sameBytes(a.reply, b.reply));
+    TEST_ASSERT_NOT_EQUAL(a.flow, b.flow);
+    TEST_ASSERT_FALSE(rx.isCurrent(a.flow));
+    TEST_ASSERT_FALSE(rx.confirmFlow(a.flow, 2));
+    CanFrame pf; FlowTicket pt; TEST_ASSERT_TRUE(rx.pendingFlow(pf, pt));
+    TEST_ASSERT_EQUAL(b.flow, pt);  // the current candidate survives
+    TEST_ASSERT_EQUAL(int(RxKind::None), int(rx.tick(1 + kNBsMs - 1).kind));  // its timer did not move
+    TEST_ASSERT_TRUE(rx.busy());
+    RxEvent e = feed(rx, ctx, m, 0, 1, 3);
+    TEST_ASSERT_EQUAL(int(RxKind::Aborted), int(e.kind));
+    TEST_ASSERT_EQUAL(reason::kOverflow, e.code);
+  }
+  {  // new panelGen: identical bytes, no delivery without its own confirmation
+    RxContext c = ctx;
+    Receiver rx(0, rxbuf, sizeof rxbuf);
+    RxOutput a = start7(rx, c, 20, 123, 0);
+    c.panelGen++;
+    auto m = message(MsgType::Request, 7, 0, 0, {});
+    Header h; h.mtype = uint8_t(MsgType::Request); h.tid = 7; h.panelGen = c.panelGen; h.bootTag = c.ownBootTag; h.encode(m.data());
+    RxOutput b = start7(rx, c, 20, crc32(m.data(), 20), 1);
+    TEST_ASSERT_TRUE(sameBytes(a.reply, b.reply));
+    TEST_ASSERT_FALSE(rx.confirmFlow(a.flow, 2));
+    TEST_ASSERT_NOT_EQUAL(int(RxKind::Message), int(feed(rx, c, m, 0, 4, 3).kind));
+    RxOutput again = start7(rx, c, 20, crc32(m.data(), 20), 4);
+    TEST_ASSERT_TRUE(rx.confirmFlow(again.flow, 4));
+    TEST_ASSERT_EQUAL(int(RxKind::Message), int(feed(rx, c, m, 0, 4, 5).kind));
+  }
+  {  // timed out, then a new assembly with the same bytes
+    Receiver rx(0, rxbuf, sizeof rxbuf);
+    RxOutput a = start7(rx, ctx, 60, 1, 0);
+    TEST_ASSERT_EQUAL(int(RxKind::TimedOut), int(rx.tick(kNBsMs).kind));
+    RxOutput b = start7(rx, ctx, 60, 1, 200);
+    TEST_ASSERT_TRUE(sameBytes(a.reply, b.reply));
+    TEST_ASSERT_FALSE(rx.confirmFlow(a.flow, 201));
+    TEST_ASSERT_TRUE(rx.isCurrent(b.flow));
+  }
+  {  // the current ticket grants exactly one block, once
+    auto m = message(MsgType::Request, 7, 0, 0, std::vector<uint8_t>(100, ' '));
+    Receiver rx(0, rxbuf, sizeof rxbuf);
+    RxOutput a = start7(rx, ctx, uint16_t(m.size()), crc32(m.data(), m.size()), 0);
+    TEST_ASSERT_TRUE(rx.confirmFlow(a.flow, 0));
+    TEST_ASSERT_FALSE(rx.confirmFlow(a.flow, 0));
+    TEST_ASSERT_EQUAL(int(RxKind::None), int(feed(rx, ctx, m, 0, 16, 1).kind));
+    CanFrame pf; FlowTicket t2; TEST_ASSERT_TRUE(rx.pendingFlow(pf, t2));
+    TEST_ASSERT_NOT_EQUAL(a.flow, t2);
+    TEST_ASSERT_FALSE(rx.confirmFlow(a.flow, 2));
+    RxEvent e = feed(rx, ctx, m, 16, 17, 2);
+    TEST_ASSERT_EQUAL(int(RxKind::Aborted), int(e.kind));
+    TEST_ASSERT_EQUAL(reason::kOverflow, e.code);
+  }
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   loadCorpus();
@@ -563,5 +646,6 @@ int main(int, char**) {
   RUN_TEST(test_r44_full_size_with_deferred_grants);
   RUN_TEST(test_r45_unknown_codes_and_tid8);
   RUN_TEST(test_r46_cache_context_and_expiry);
+  RUN_TEST(test_r44_ticket_identity);
   return UNITY_END();
 }

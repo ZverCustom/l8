@@ -166,15 +166,24 @@ struct RxEvent {
   size_t len = 0;    // Message: bytes in the buffer
   Header header;
 };
+// Local identity of one CTS candidate (unique per receiver, never derived from wire bytes;
+// 0 = none).
+using FlowTicket = uint32_t;
+
 struct RxOutput {
   bool hasReply = false;
   CanFrame reply;
+  // Non-zero when `reply` is a CTS candidate: confirmFlow(flow) once it is transmitted.
+  FlowTicket flow = 0;
   RxEvent event;
 };
 
-// One bounded assembly for one sender. A FLOW CTS is a candidate when formed (reply /
-// pendingFlow); the next block becomes acceptable only after confirmFlow() with that very
-// frame, i.e. when it was really transmitted. XDATA beyond the granted block → RABORT
+// One bounded assembly for one sender. A FLOW CTS is a candidate when formed (reply + flow
+// ticket / pendingFlow). Two assemblies' CTS frames can be byte-identical (same tid, other
+// CRC or panelGen); their tickets never are. The next block becomes acceptable only after
+// confirmFlow(ticket) of the current candidate, i.e. when it was really transmitted. Before
+// transmitting a queued CTS the owner checks isCurrent(ticket): a stale one is dropped,
+// and a late confirmation of it changes nothing (not the current candidate, not its timer). XDATA beyond the granted block → RABORT
 // OVERFLOW. On completion the length, CRC and whole header are checked before the message
 // is handed out; the ACK comes in the same output and must be queued before the handler
 // runs. A delayed copy of the delivered XSTART (same context, within kDupWindowMs) is ignored.
@@ -184,10 +193,13 @@ class Receiver {
       : peer_(peer), buf_(buf), cap_(cap < kMaxMessage ? cap : kMaxMessage), block_(block ? block : 1), stmin_(stmin) {}
   RxOutput onFrame(const CanFrame& f, const RxContext& ctx, uint32_t now);
   RxEvent tick(uint32_t now);
-  // The CTS waiting to be transmitted (offered again after a refusal).
-  bool pendingFlow(CanFrame& out) const;
-  // `f` was transmitted: only the current pending CTS grants credit. Returns whether it counted.
-  bool confirmFlow(const CanFrame& f, uint32_t now);
+  // The CTS waiting to be transmitted and its ticket (offered again after a refusal).
+  bool pendingFlow(CanFrame& out, FlowTicket& ticket) const;
+  // Whether `t` is still the current candidate: check before transmitting a queued CTS.
+  bool isCurrent(FlowTicket t) const { return t != 0 && active_ && havePending_ && t == pendingTicket_; }
+  // The CTS of ticket `t` was transmitted: only the current candidate grants credit (one
+  // block); a stale/repeated ticket changes nothing. Returns whether it counted.
+  bool confirmFlow(FlowTicket t, uint32_t now);
   const uint8_t* message() const { return buf_; }
   bool busy() const { return active_; }
   uint32_t invalid = 0;
@@ -205,6 +217,8 @@ class Receiver {
   uint16_t credit_ = 0;
   bool havePending_ = false;
   CanFrame pending_;
+  FlowTicket pendingTicket_ = 0, tickets_ = 0;
+  FlowTicket newTicket() { if (++tickets_ == 0) tickets_ = 1; return tickets_; }
   uint16_t lastTid_ = 0, lastLen_ = 0;
   uint32_t lastCrc_ = 0, lastAt_ = 0;
   RxContext lastCtx_;
