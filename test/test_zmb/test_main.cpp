@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "zmb.h"
+#include "zmb_disc.h"
 
 using namespace zmb;
 
@@ -705,6 +706,120 @@ static void test_r49_old_lease_after_reset_or_new_owner() {
   TEST_ASSERT_TRUE(u.finish(mine, 7));
 }
 
+
+// ---- module discovery (§4.2) ----
+
+static uint32_t fixedRand(void* ctx) { return *static_cast<uint32_t*>(ctx); }
+
+static CanFrame panelFrame(uint8_t func, uint8_t prio, uint32_t panelId, uint32_t gen) {
+  CanFrame f;
+  AddrId a{prio, func, 0, 0x3F, 0};
+  f.id = a.encode();
+  uint8_t d[8] = {uint8_t(panelId >> 24), uint8_t(panelId >> 16), uint8_t(panelId >> 8), uint8_t(panelId),
+                  uint8_t(gen >> 24), uint8_t(gen >> 16), uint8_t(gen >> 8), uint8_t(gen)};
+  memcpy(f.data, d, 8);
+  return f;
+}
+static CanFrame assignFrame(const uint8_t mac[6], uint8_t addr, uint8_t genLo) {
+  CanFrame f;
+  f.id = identityId(6, sfunc::kAssign, mac);
+  memcpy(f.data, mac, 6);
+  f.data[6] = addr;
+  f.data[7] = genLo;
+  return f;
+}
+static CanFrame beaconFrame(const uint8_t mac[6], uint8_t addr) {
+  CanFrame f;
+  f.id = identityId(5, sfunc::kBeacon, mac);
+  f.data[0] = addr;
+  memcpy(f.data + 1, mac, 6);
+  return f;
+}
+
+// Trace A (§4.4): both start at 37, A (lower ID) wins, B lost → retried 1..20 ms later;
+// ASSIGN only with our MAC and this panelGen; then BEACON every 1000 ± 125.
+static void test_disc_trace_a_and_assign_rules() {
+  const uint8_t macA[6] = {0x10, 0xBD, 0xA3, 0x5F, 0x51, 0x14}, macB[6] = {0x10, 0xBD, 0xA3, 0x5F, 0x88, 0x02};
+  uint32_t r = 37;
+  ModuleDiscovery a(macA, 1, fixedRand, &r), b(macB, 1, fixedRand, &r);
+  CanFrame hb = panelFrame(sfunc::kPanelHb, 2, 0x11223344, 0x9F2C1A07), out;
+  TEST_ASSERT_TRUE(a.onFrame(hb, 0));
+  b.onFrame(hb, 0);
+  TEST_ASSERT_FALSE(a.poll(36, out));
+  TEST_ASSERT_TRUE(a.poll(37, out));
+  TEST_ASSERT_EQUAL_HEX32(0x1BEF5114, out.id);
+  TEST_ASSERT_EQUAL_UINT8(0, out.data[7]);
+  a.sent(37);
+  TEST_ASSERT_TRUE(b.poll(37, out));
+  TEST_ASSERT_EQUAL_HEX32(0x1BEF8802, out.id);
+  b.lost(37);  // arbitration lost, nothing sent
+  TEST_ASSERT_FALSE(b.poll(37 + 17, out));
+  TEST_ASSERT_TRUE(b.poll(37 + 18, out));  // 1 + 37 % 20
+  b.sent(55);
+  // ASSIGN for another MAC or another panelGen changes nothing
+  a.onFrame(assignFrame(macB, 1, 0x07), 60);
+  a.onFrame(assignFrame(macA, 1, 0x08), 60);
+  TEST_ASSERT_FALSE(a.assigned());
+  a.onFrame(assignFrame(macA, 1, 0x07), 87);
+  b.onFrame(assignFrame(macB, 2, 0x07), 95);
+  TEST_ASSERT_TRUE(a.assigned() && b.assigned());
+  TEST_ASSERT_EQUAL_UINT8(1, a.addr());
+  TEST_ASSERT_EQUAL_UINT8(2, b.addr());
+  TEST_ASSERT_TRUE(a.poll(87 + 37, out));  // first BEACON 0..250 ms after ASSIGN
+  TEST_ASSERT_EQUAL_HEX32(identityId(5, sfunc::kBeacon, macA), out.id);
+  a.sent(124);
+  TEST_ASSERT_FALSE(a.poll(124 + 911, out));
+  TEST_ASSERT_TRUE(a.poll(124 + 912, out));  // 875 + 37
+}
+
+// Rules 2, 5, 6, 7 and the announce retry/bus-error counters.
+static void test_disc_want_conflict_release_and_new_gen() {
+  const uint8_t mac[6] = {0x10, 0xBD, 0xA3, 0x5F, 0x51, 0x14}, other[6] = {0x10, 0xBD, 0xA3, 0x5F, 0x88, 0x02};
+  uint32_t r = 0;
+  ModuleDiscovery d(mac, 1, fixedRand, &r);
+  d.setStored(0x11223344, 5);
+  CanFrame out;
+  d.onFrame(panelFrame(sfunc::kPanelHb, 2, 0x11223344, 0x01), 0);
+  TEST_ASSERT_TRUE(d.poll(0, out));
+  TEST_ASSERT_EQUAL_UINT8(5, out.data[7]);  // rule 2: same panelId → stored address wanted
+  d.sent(0);
+  TEST_ASSERT_FALSE(d.poll(999, out));
+  TEST_ASSERT_TRUE(d.poll(1000, out));  // sent without ASSIGN → 1000 + 0..250
+  for (int i = 0; i < 5; i++) {
+    TEST_ASSERT_TRUE(d.poll(2000 + i * 100, out));
+    d.busError(2000 + i * 100);
+  }
+  TEST_ASSERT_EQUAL_UINT32(1, d.announceErrors);
+  d.onFrame(assignFrame(mac, 5, 0x01), 3000);
+  uint32_t g = d.generation();
+  TEST_ASSERT_TRUE(d.assigned());
+  // rule 7: new panelGen, same panel → confirmation forgotten, address kept as wantAddr
+  d.onFrame(panelFrame(sfunc::kDiscover, 6, 0x11223344, 0x02), 3100);
+  TEST_ASSERT_FALSE(d.assigned());
+  TEST_ASSERT_TRUE(d.generation() > g);
+  TEST_ASSERT_TRUE(d.poll(3100, out));
+  TEST_ASSERT_EQUAL_UINT8(5, out.data[7]);
+  d.sent(3100);
+  d.onFrame(assignFrame(mac, 5, 0x02), 3110);
+  TEST_ASSERT_TRUE(d.assigned());
+  // rule 5: another MAC beacons our address → back to ANNOUNCE with wantAddr 0
+  g = d.generation();
+  d.onFrame(beaconFrame(other, 5), 3200);
+  TEST_ASSERT_FALSE(d.assigned());
+  TEST_ASSERT_TRUE(d.generation() > g);
+  TEST_ASSERT_TRUE(d.poll(3200, out));
+  TEST_ASSERT_EQUAL_UINT8(0, out.data[7]);
+  d.sent(3200);
+  d.onFrame(assignFrame(mac, 6, 0x02), 3210);
+  TEST_ASSERT_EQUAL_UINT8(6, d.addr());
+  // rule 6: RELEASE
+  d.onFrame(assignFrame(mac, 0, 0x02), 3300);
+  TEST_ASSERT_FALSE(d.assigned());
+  TEST_ASSERT_EQUAL_UINT8(0, d.addr());
+  TEST_ASSERT_TRUE(d.poll(3300, out));
+  TEST_ASSERT_EQUAL_UINT8(0, out.data[7]);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   loadCorpus();
@@ -726,5 +841,7 @@ int main(int, char**) {
   RUN_TEST(test_tid_all_taken_waits_and_quarantine_from_last_frame);
   RUN_TEST(test_tid_wrap_and_stale_serials);
   RUN_TEST(test_r49_old_lease_after_reset_or_new_owner);
+  RUN_TEST(test_disc_trace_a_and_assign_rules);
+  RUN_TEST(test_disc_want_conflict_release_and_new_gen);
   return UNITY_END();
 }
