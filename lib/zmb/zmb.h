@@ -13,6 +13,9 @@ constexpr size_t kHeaderLen = 20;
 constexpr size_t kMinMessage = kHeaderLen;
 constexpr size_t kMaxMessage = 24596;
 constexpr uint32_t kNBsMs = 150, kTAckMs = 150, kNCrMs = 100;
+// A delayed copy of a delivered message's XSTART is recognised this long (far below the
+// 60 s tid reuse limit of §5.5).
+constexpr uint32_t kDupWindowMs = 1000;
 constexpr uint8_t kMaxWaits = 3;
 
 namespace func { constexpr uint8_t kFlow = 0x08, kAck = 0x09, kRabort = 0x0A, kXstart = 0x10, kXdata = 0x11, kXabort = 0x12; }
@@ -48,8 +51,11 @@ struct TFrame {
 
 // Builds the frame `t` from src to dst (reserved bytes zero).
 CanFrame build(uint8_t src, uint8_t dst, uint8_t tid8, const TFrame& t);
-// Parses a ZMB transport frame; false for standard/remote/short/out-of-range/unknown.
+// Parses a ZMB transport frame; false for standard/remote/short/out-of-range frames, an
+// unknown function, or an unknown FLOW/ACK/ABORT code (§1: dropped, no state change).
 bool parse(const CanFrame& f, AddrId& a, TFrame& t);
+// An extended frame from src to dst, whatever it carries (to count invalid input).
+bool addressed(const CanFrame& f, uint8_t src, uint8_t dst);
 
 TFrame xstart(uint16_t len, uint16_t tid, uint32_t crc);
 TFrame xdata(uint16_t seq, const uint8_t* six);
@@ -120,6 +126,8 @@ class Sender {
   bool committed() const { return state_ == TxState::WaitAck; }
   uint16_t tid() const { return tid_; }
   uint32_t crc() const { return crc_; }
+  // Frames addressed to us that were dropped (unknown code, wrong tid8, wrong state).
+  uint32_t invalid = 0;
 
  private:
   enum class Cand : uint8_t { None, XStart, XData, XAbort };
@@ -147,6 +155,7 @@ struct RxContext {
   bool haveAssignedMac = false;  // panel
   uint8_t assignedMac[6] = {0};
   bool srcAssigned = true;
+  bool operator==(const RxContext& o) const;
 };
 
 enum class RxKind : uint8_t { None, Message, Rejected, Aborted, TimedOut, Duplicate };
@@ -163,17 +172,25 @@ struct RxOutput {
   RxEvent event;
 };
 
-// One bounded assembly for one sender. On completion the length, CRC and whole header
-// are checked before the message is handed out; the ACK comes in the same output and
-// must be queued before the handler runs.
+// One bounded assembly for one sender. A FLOW CTS is a candidate when formed (reply /
+// pendingFlow); the next block becomes acceptable only after confirmFlow() with that very
+// frame, i.e. when it was really transmitted. XDATA beyond the granted block → RABORT
+// OVERFLOW. On completion the length, CRC and whole header are checked before the message
+// is handed out; the ACK comes in the same output and must be queued before the handler
+// runs. A delayed copy of the delivered XSTART (same context, within kDupWindowMs) is ignored.
 class Receiver {
  public:
   Receiver(uint8_t peer, uint8_t* buf, size_t cap, uint8_t block = 16, uint8_t stmin = 0)
       : peer_(peer), buf_(buf), cap_(cap < kMaxMessage ? cap : kMaxMessage), block_(block ? block : 1), stmin_(stmin) {}
   RxOutput onFrame(const CanFrame& f, const RxContext& ctx, uint32_t now);
   RxEvent tick(uint32_t now);
+  // The CTS waiting to be transmitted (offered again after a refusal).
+  bool pendingFlow(CanFrame& out) const;
+  // `f` was transmitted: only the current pending CTS grants credit. Returns whether it counted.
+  bool confirmFlow(const CanFrame& f, uint32_t now);
   const uint8_t* message() const { return buf_; }
   bool busy() const { return active_; }
+  uint32_t invalid = 0;
 
  private:
   uint8_t check(const RxContext& ctx, Header& h) const;
@@ -185,9 +202,12 @@ class Receiver {
   bool active_ = false, haveLast_ = false;
   uint16_t tid_ = 0, len_ = 0, expected_ = 0, last_ = 0;
   uint32_t crc_ = 0, deadline_ = 0;
-  uint8_t sinceFlow_ = 0;
+  uint16_t credit_ = 0;
+  bool havePending_ = false;
+  CanFrame pending_;
   uint16_t lastTid_ = 0, lastLen_ = 0;
-  uint32_t lastCrc_ = 0;
+  uint32_t lastCrc_ = 0, lastAt_ = 0;
+  RxContext lastCtx_;
 };
 
 // Reply matching (§5.5) for replies without a JSON id (HELLO_ACK on the module side).

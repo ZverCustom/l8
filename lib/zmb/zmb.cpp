@@ -54,6 +54,19 @@ CanFrame build(uint8_t src, uint8_t dst, uint8_t tid8, const TFrame& t) {
   return f;
 }
 
+static bool validReason(uint8_t r) { return r >= reason::kCancel && r <= reason::kSuperseded; }
+
+bool addressed(const CanFrame& f, uint8_t src, uint8_t dst) {
+  if (!f.extended || f.rtr || f.id > 0x1FFFFFFFu) return false;
+  AddrId a = AddrId::decode(f.id);
+  return a.src == src && a.dst == dst;
+}
+
+bool RxContext::operator==(const RxContext& o) const {
+  return local == o.local && side == o.side && panelGen == o.panelGen && ownBootTag == o.ownBootTag && havePeerBootTag == o.havePeerBootTag &&
+         peerBootTag == o.peerBootTag && haveAssignedMac == o.haveAssignedMac && memcmp(assignedMac, o.assignedMac, 6) == 0 && srcAssigned == o.srcAssigned;
+}
+
 bool parse(const CanFrame& f, AddrId& a, TFrame& t) {
   if (!f.extended || f.rtr || f.dlc != 8 || f.id > 0x1FFFFFFFu) return false;
   a = AddrId::decode(f.id);
@@ -62,10 +75,11 @@ bool parse(const CanFrame& f, AddrId& a, TFrame& t) {
   switch (a.func) {
     case func::kXstart: t.kind = Kind::XStart; t.len = be16(d); t.tid = be16(d + 2); t.crc = be32(d + 4); return true;
     case func::kXdata: t.kind = Kind::XData; t.seq = be16(d); memcpy(t.bytes, d + 2, 6); return true;
-    case func::kXabort: t.kind = Kind::XAbort; t.tid = be16(d); t.reason = d[2]; return true;
-    case func::kFlow: t.kind = Kind::Flow; t.tid = be16(d); t.status = d[2]; t.block = d[3]; t.stmin = d[4]; t.expected = be16(d + 5); return true;
-    case func::kAck: t.kind = Kind::Ack; t.tid = be16(d); t.status = d[2]; t.crc = be32(d + 3); return true;
-    case func::kRabort: t.kind = Kind::RAbort; t.tid = be16(d); t.reason = d[2]; return true;
+    // Unknown codes are dropped here (§1): an unknown ACK status is no proof of anything.
+    case func::kXabort: if (!validReason(d[2])) return false; t.kind = Kind::XAbort; t.tid = be16(d); t.reason = d[2]; return true;
+    case func::kFlow: if (d[2] > flow::kOverflow) return false; t.kind = Kind::Flow; t.tid = be16(d); t.status = d[2]; t.block = d[3]; t.stmin = d[4]; t.expected = be16(d + 5); return true;
+    case func::kAck: if (d[2] > ack::kBadHeader) return false; t.kind = Kind::Ack; t.tid = be16(d); t.status = d[2]; t.crc = be32(d + 3); return true;
+    case func::kRabort: if (!validReason(d[2])) return false; t.kind = Kind::RAbort; t.tid = be16(d); t.reason = d[2]; return true;
     default: return false;
   }
 }
@@ -218,8 +232,13 @@ TxOutcome Sender::finish(TxResult r, uint8_t code, uint8_t abortReason) {
 
 TxOutcome Sender::onFrame(const CanFrame& f, uint32_t now) {
   AddrId a; TFrame t;
-  if (!parse(f, a, t) || state_ == TxState::Idle) return {};
-  if (a.src != peer_ || a.dst != local_ || a.tid8 != uint8_t(tid_ & 0xFF) || t.tid != tid_) return {};
+  if (!parse(f, a, t)) {
+    if (addressed(f, peer_, local_)) invalid++;  // unknown code: dropped, state unchanged
+    return {};
+  }
+  if (a.src != peer_ || a.dst != local_) return {};
+  if (state_ == TxState::Idle || a.tid8 != uint8_t(tid_ & 0xFF)) { invalid++; return {}; }
+  if (t.tid != tid_) return {};
   if (t.kind == Kind::Flow && state_ == TxState::WaitFlow) {
     if (t.status == flow::kCts && t.expected == nextSeq_ && t.block > 0) {
       waits_ = 0;
@@ -269,16 +288,40 @@ CanFrame Receiver::reply(const RxContext& ctx, uint16_t tid, const TFrame& t) co
   return build(ctx.local, peer_, uint8_t(tid & 0xFF), t);
 }
 
+bool Receiver::pendingFlow(CanFrame& out) const {
+  if (!active_ || !havePending_) return false;
+  out = pending_;
+  return true;
+}
+
+static bool sameFrame(const CanFrame& a, const CanFrame& b) {
+  return a.id == b.id && a.extended == b.extended && a.rtr == b.rtr && a.dlc == b.dlc && memcmp(a.data, b.data, 8) == 0;
+}
+
+bool Receiver::confirmFlow(const CanFrame& f, uint32_t now) {
+  if (!active_ || !havePending_ || !sameFrame(f, pending_)) return false;
+  havePending_ = false;
+  uint16_t left = uint16_t(last_ - expected_ + 1);
+  credit_ = block_ < left ? block_ : left;
+  deadline_ = now + kNCrMs;
+  return true;
+}
+
 RxOutput Receiver::onFrame(const CanFrame& f, const RxContext& ctx, uint32_t now) {
   RxOutput out;
   AddrId a; TFrame t;
-  if (!parse(f, a, t) || a.src != peer_ || a.dst != ctx.local) return out;
+  if (!parse(f, a, t)) {
+    if (addressed(f, peer_, ctx.local)) invalid++;  // unknown code: dropped, state unchanged
+    return out;
+  }
+  if (a.src != peer_ || a.dst != ctx.local) return out;
   if (t.kind == Kind::XStart) {
-    if (!active_ && haveLast_ && lastTid_ == t.tid && lastCrc_ == t.crc && lastLen_ == t.len) {
-      out.hasReply = true; out.reply = reply(ctx, t.tid, ackFrame(t.tid, ack::kOk, t.crc));
-      out.event.kind = RxKind::Duplicate; out.event.tid = t.tid;
+    if (a.tid8 != uint8_t(t.tid & 0xFF)) { invalid++; return out; }
+    if (!active_ && haveLast_ && !expired(lastAt_ + kDupWindowMs, now) && lastCtx_ == ctx && lastTid_ == t.tid && lastCrc_ == t.crc && lastLen_ == t.len) {
+      out.event.kind = RxKind::Duplicate; out.event.tid = t.tid;  // a delayed copy: ignored
       return out;
     }
+    haveLast_ = false;
     if (active_) {
       active_ = false;
       out.event.kind = RxKind::Aborted; out.event.tid = tid_; out.event.code = reason::kSuperseded;
@@ -291,25 +334,27 @@ RxOutput Receiver::onFrame(const CanFrame& f, const RxContext& ctx, uint32_t now
       out.hasReply = true; out.reply = reply(ctx, t.tid, flowFrame(t.tid, flow::kOverflow, 0, 0, 1));
       return out;
     }
-    haveLast_ = false;
-    active_ = true; tid_ = t.tid; len_ = t.len; crc_ = t.crc; expected_ = 1; last_ = uint16_t((t.len + 5) / 6); sinceFlow_ = 0;
-    deadline_ = now + kNCrMs;
-    out.hasReply = true; out.reply = reply(ctx, t.tid, flowFrame(t.tid, flow::kCts, block_, stmin_, 1));
+    active_ = true; tid_ = t.tid; len_ = t.len; crc_ = t.crc; expected_ = 1; last_ = uint16_t((t.len + 5) / 6); credit_ = 0;
+    pending_ = reply(ctx, t.tid, flowFrame(t.tid, flow::kCts, block_, stmin_, 1)); havePending_ = true;
+    deadline_ = now + kNBsMs;  // our CTS not transmitted yet: the sender gives up after N_Bs
+    out.hasReply = true; out.reply = pending_;
     return out;
   }
   if (t.kind == Kind::XData) {
-    if (!active_ || a.tid8 != uint8_t(tid_ & 0xFF)) return out;
+    if (!active_) return out;
+    if (a.tid8 != uint8_t(tid_ & 0xFF)) { invalid++; return out; }
     if (t.seq != 0 && t.seq == uint16_t(expected_ - 1)) return out;  // duplicate
-    if (t.seq != expected_) {
+    if (t.seq != expected_ || credit_ == 0) {
+      uint8_t why = t.seq != expected_ ? reason::kSeqGap : reason::kOverflow;  // gap, or beyond the granted block
       active_ = false;
-      out.hasReply = true; out.reply = reply(ctx, tid_, abortFrame(Kind::RAbort, tid_, reason::kSeqGap));
-      out.event.kind = RxKind::Aborted; out.event.tid = tid_; out.event.code = reason::kSeqGap;
+      out.hasReply = true; out.reply = reply(ctx, tid_, abortFrame(Kind::RAbort, tid_, why));
+      out.event.kind = RxKind::Aborted; out.event.tid = tid_; out.event.code = why;
       return out;
     }
     size_t at = size_t(t.seq - 1) * 6;
     size_t n = len_ - at < 6 ? len_ - at : 6;
     memcpy(buf_ + at, t.bytes, n);
-    expected_++; sinceFlow_++;
+    expected_++; credit_--;
     deadline_ = now + kNCrMs;
     if (t.seq == last_) {
       active_ = false;
@@ -318,28 +363,34 @@ RxOutput Receiver::onFrame(const CanFrame& f, const RxContext& ctx, uint32_t now
       out.hasReply = true; out.reply = reply(ctx, tid_, ackFrame(tid_, status, crc_));
       out.event.tid = tid_;
       if (status == ack::kOk) {
-        haveLast_ = true; lastTid_ = tid_; lastCrc_ = crc_; lastLen_ = len_;
+        haveLast_ = true; lastTid_ = tid_; lastCrc_ = crc_; lastLen_ = len_; lastAt_ = now; lastCtx_ = ctx;
         out.event.kind = RxKind::Message; out.event.len = len_; out.event.header = h;
       } else {
         out.event.kind = RxKind::Rejected; out.event.code = status;
       }
       return out;
     }
-    if (sinceFlow_ >= block_) {
-      sinceFlow_ = 0;
-      out.hasReply = true; out.reply = reply(ctx, tid_, flowFrame(tid_, flow::kCts, block_, stmin_, expected_));
+    if (credit_ == 0) {
+      pending_ = reply(ctx, tid_, flowFrame(tid_, flow::kCts, block_, stmin_, expected_)); havePending_ = true;
+      deadline_ = now + kNBsMs;
+      out.hasReply = true; out.reply = pending_;
     }
     return out;
   }
-  if (t.kind == Kind::XAbort && active_ && t.tid == tid_) {
-    active_ = false;
-    out.event.kind = RxKind::Aborted; out.event.tid = t.tid; out.event.code = t.reason;
+  if (t.kind == Kind::XAbort) {
+    if (active_ && t.tid == tid_ && a.tid8 == uint8_t(tid_ & 0xFF)) {
+      active_ = false;
+      out.event.kind = RxKind::Aborted; out.event.tid = t.tid; out.event.code = t.reason;
+    } else {
+      invalid++;
+    }
   }
   return out;
 }
 
 RxEvent Receiver::tick(uint32_t now) {
   RxEvent e;
+  if (haveLast_ && expired(lastAt_ + kDupWindowMs, now)) haveLast_ = false;
   if (active_ && expired(deadline_, now)) {
     active_ = false;
     e.kind = RxKind::TimedOut; e.tid = tid_;

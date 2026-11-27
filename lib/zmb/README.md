@@ -35,8 +35,19 @@ corpus `test/test_zmb/corpus_v1.txt` and against each other (d7-d10
     side, generations (`panelGen`, own bootTag; HELLO: bootTag = bootId[0..4] and MAC of
     the assigned src in deviceId). Only then the `Message` event;
   - the ACK comes in the same output and **must be queued before the handler runs**;
-  - a repeated XSTART of the message just delivered is answered ACK OK again, not
-    delivered twice.
+  - **credit:** a FLOW CTS is only a candidate when formed (`reply` / `pendingFlow`).
+    The block becomes acceptable only after `confirmFlow(frame, now)` with that very
+    frame, i.e. once it is really transmitted. A held, refused or stale CTS (superseded,
+    timed out) grants nothing. XDATA beyond the granted block → RABORT OVERFLOW, no
+    message. While our CTS waits, the assembly lives N_Bs (the sender gives up then);
+    after it, N_Cr;
+  - a delayed copy of the XSTART just delivered (same context and generations, within
+    `kDupWindowMs` = 1 s) is ignored: no ACK, no FLOW, no second delivery. A new
+    generation, another context, or after 1 s (tid reuse is legal after 60 s) → a fresh
+    assembly;
+  - unknown FLOW/ACK/ABORT codes are dropped by `parse` (§1); an XSTART/XABORT/XDATA
+    with another tid8 changes nothing. Both count in `invalid` (Sender and Receiver).
+    A valid ACK ≠ 0 is still `Rejected`.
 - **`matchReply`** — reply matching without a JSON id (HELLO_ACK); RESPONSE/JSON-id
   matching is the panel's (Rust).
 
@@ -46,11 +57,12 @@ corpus `test/test_zmb/corpus_v1.txt` and against each other (d7-d10
 - No allocation, no sleeps:
   - `Sender` reads the caller's message in place (keep it alive until the outcome);
   - `Receiver` writes only into the caller's buffer.
-- Sizes (host, 64-bit): `Sender` 56 bytes, `Receiver` 56 bytes + the caller buffer.
+- Sizes (host, 64-bit): `Sender` 56 bytes, `Receiver` 104 bytes + the caller buffer.
 
 ## What a future adapter must confirm
 
-`confirm()` only after the frame is really in the transmit path (TWAI queue / CAN_TX).
+`confirm()` / `confirmFlow()` only after the frame is really in the transmit path (TWAI
+queue / CAN_TX).
 The last XDATA's confirm is the irreversibility boundary of §12. A refused or dropped
 frame → `refuse()`, never `confirm()`.
 

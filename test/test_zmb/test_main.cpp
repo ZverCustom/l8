@@ -81,6 +81,7 @@ struct Link {
       RxOutput o = rx.onFrame(f, ctx, now);
       if (o.event.kind != RxKind::None) events.push_back(o.event);
       if (o.hasReply) {
+        rx.confirmFlow(o.reply, now);  // the harness is the lower layer: on the bus = transmitted
         bus.push_back(o.reply);
         TxOutcome r = tx.onFrame(o.reply, now);
         if (r.result != TxResult::None) out = r;
@@ -174,7 +175,7 @@ static void test_seq_gap_duplicate_corruption() {
         RxOutput o = l.rx.onFrame(f, l.ctx, l.now);
         AddrId a; TFrame t; parse(f, a, t);
         if (rep == 1) silent = silent || (t.kind == Kind::XData && t.seq == 3 && !o.hasReply && o.event.kind == RxKind::None);
-        if (o.hasReply) { TxOutcome r = l.tx.onFrame(o.reply, l.now); if (r.result != TxResult::None) l.out = r; }
+        if (o.hasReply) { l.rx.confirmFlow(o.reply, l.now); TxOutcome r = l.tx.onFrame(o.reply, l.now); if (r.result != TxResult::None) l.out = r; }
         if (!(t.kind == Kind::XData && t.seq == 3)) break;
       }
     }
@@ -295,6 +296,13 @@ static void test_timers_cancel_generation_wrap() {
   TEST_ASSERT_EQUAL(int(TxResult::NotDelivered), int(s.tick(uint32_t(0xFFFFFFFFu - 10 + kNBsMs)).result));
   Receiver r(0, rxbuf, sizeof rxbuf);
   r.onFrame(build(0, 1, 1, xstart(180, 1, 0)), moduleCtx(), 0xFFFFFFFFu - 50);
+  // our CTS not transmitted yet: the hold limit is N_Bs
+  TEST_ASSERT_EQUAL(int(RxKind::None), int(r.tick(0xFFFFFFFFu).kind));
+  TEST_ASSERT_EQUAL(int(RxKind::None), int(r.tick(49).kind));
+  TEST_ASSERT_EQUAL(int(RxKind::TimedOut), int(r.tick(99).kind));
+  // after the CTS is transmitted the pause between XDATA is N_Cr
+  RxOutput c0 = r.onFrame(build(0, 1, 1, xstart(180, 1, 0)), moduleCtx(), 0xFFFFFFFFu - 50);
+  TEST_ASSERT_TRUE(r.confirmFlow(c0.reply, 0xFFFFFFFFu - 50));
   TEST_ASSERT_EQUAL(int(RxKind::None), int(r.tick(0xFFFFFFFFu).kind));
   TEST_ASSERT_EQUAL(int(RxKind::TimedOut), int(r.tick(49).kind));
   auto small = message(MsgType::Request, 2, 0, 0, {'{', '}'});
@@ -324,7 +332,8 @@ static void test_duplicate_xstart_and_supersede() {
   l.run();
   RxOutput o = l.rx.onFrame(l.bus[0], l.ctx, l.now);
   TEST_ASSERT_EQUAL(int(RxKind::Duplicate), int(o.event.kind));
-  TEST_ASSERT_TRUE(o.hasReply);
+  TEST_ASSERT_FALSE(o.hasReply);  // a delayed copy: no ACK, no FLOW
+  TEST_ASSERT_FALSE(l.rx.busy());
   TEST_ASSERT_EQUAL(1, l.messages());
   Receiver r(0, rxbuf, sizeof rxbuf);
   r.onFrame(build(0, 1, 2, xstart(180, 0x0102, 0)), moduleCtx(), 0);
@@ -347,6 +356,196 @@ static void test_reserved_written_zero_and_ignored() {
   TEST_ASSERT_EQUAL(0, f.data[7]);
 }
 
+// ---- R44: credit is granted only by a transmitted CTS ----
+
+static std::vector<CanFrame> framesOf(const std::vector<uint8_t>& m, uint16_t tid) {
+  std::vector<CanFrame> fs;
+  uint8_t t8 = uint8_t(tid & 0xFF);
+  fs.push_back(build(0, 1, t8, xstart(uint16_t(m.size()), tid, crc32(m.data(), m.size()))));
+  for (size_t at = 0, seq = 1; at < m.size(); at += 6, seq++) {
+    uint8_t b[6] = {0};
+    memcpy(b, m.data() + at, m.size() - at < 6 ? m.size() - at : 6);
+    fs.push_back(build(0, 1, t8, xdata(uint16_t(seq), b)));
+  }
+  return fs;
+}
+
+static bool isMessage(const RxOutput& o) { return o.event.kind == RxKind::Message; }
+
+static void test_r44_credit_only_from_transmitted_cts() {
+  auto m = message(MsgType::Request, 7, 0, 0, std::vector<uint8_t>(100, ' '));  // 120 B = 20 XDATA
+  auto f = framesOf(m, 7);
+  RxContext ctx = moduleCtx();
+  {  // initial CTS formed but not transmitted
+    Receiver rx(0, rxbuf, sizeof rxbuf);
+    RxOutput o = rx.onFrame(f[0], ctx, 0);
+    CanFrame p; TEST_ASSERT_TRUE(rx.pendingFlow(p));
+    o = rx.onFrame(f[1], ctx, 0);
+    TEST_ASSERT_EQUAL(int(RxKind::Aborted), int(o.event.kind));
+    TEST_ASSERT_EQUAL(reason::kOverflow, o.event.code);
+    AddrId a; TFrame t; TEST_ASSERT_TRUE(parse(o.reply, a, t));
+    TEST_ASSERT_EQUAL(int(Kind::RAbort), int(t.kind));
+    TEST_ASSERT_FALSE(rx.busy());
+  }
+  {  // next CTS held: XDATA 17.. refused, nothing delivered; asking again grants nothing
+    Receiver rx(0, rxbuf, sizeof rxbuf);
+    RxOutput o = rx.onFrame(f[0], ctx, 0);
+    TEST_ASSERT_TRUE(rx.confirmFlow(o.reply, 0));
+    CanFrame next; bool formed = false;
+    for (int i = 1; i <= 16; i++) { o = rx.onFrame(f[i], ctx, 0); if (o.hasReply) { next = o.reply; formed = true; } }
+    TEST_ASSERT_TRUE(formed);
+    for (int k = 0; k < 3; k++) { CanFrame p; TEST_ASSERT_TRUE(rx.pendingFlow(p)); }
+    o = rx.onFrame(f[17], ctx, 0);
+    TEST_ASSERT_EQUAL(int(RxKind::Aborted), int(o.event.kind));
+    TEST_ASSERT_EQUAL(reason::kOverflow, o.event.code);
+    bool delivered = false;
+    for (size_t i = 18; i < f.size(); i++) delivered = delivered || isMessage(rx.onFrame(f[i], ctx, 0));
+    TEST_ASSERT_FALSE(delivered);
+  }
+  {  // refused, then transmitted: completes; an old CTS grants nothing
+    Receiver rx(0, rxbuf, sizeof rxbuf);
+    rx.onFrame(f[0], ctx, 0);
+    CanFrame first; TEST_ASSERT_TRUE(rx.pendingFlow(first));
+    TEST_ASSERT_TRUE(rx.confirmFlow(first, 5));
+    for (int i = 1; i <= 16; i++) rx.onFrame(f[i], ctx, 5);
+    CanFrame second; TEST_ASSERT_TRUE(rx.pendingFlow(second));
+    TEST_ASSERT_FALSE(rx.confirmFlow(first, 6));
+    TEST_ASSERT_TRUE(rx.confirmFlow(second, 30));
+    bool delivered = false;
+    for (size_t i = 17; i < f.size(); i++) delivered = delivered || isMessage(rx.onFrame(f[i], ctx, 30));
+    TEST_ASSERT_TRUE(delivered);
+  }
+  {  // stale CTS after supersede or timeout
+    Receiver rx(0, rxbuf, sizeof rxbuf);
+    CanFrame old = rx.onFrame(build(0, 1, 1, xstart(60, 1, 0)), ctx, 0).reply;
+    rx.onFrame(build(0, 1, 2, xstart(60, 2, 0)), ctx, 1);
+    TEST_ASSERT_FALSE(rx.confirmFlow(old, 2));
+    CanFrame cur; TEST_ASSERT_TRUE(rx.pendingFlow(cur));
+    rx.tick(1 + kNBsMs);
+    TEST_ASSERT_FALSE(rx.busy());
+    TEST_ASSERT_FALSE(rx.confirmFlow(cur, 200));
+  }
+}
+
+static void test_r44_full_size_with_deferred_grants() {
+  auto big = message(MsgType::Request, 0x0400, 0, 0, std::vector<uint8_t>(kMaxMessage - 20, 'q'));
+  Sender tx(0, 1);
+  Receiver rx(0, rxbuf, sizeof rxbuf);
+  RxContext ctx = moduleCtx();
+  TEST_ASSERT_TRUE(tx.start(big.data(), big.size(), 0x0400));
+  uint32_t now = 0; bool held = false; CanFrame h; TxOutcome out; bool msg = false;
+  for (int i = 0; i < 20000; i++) {
+    now++;
+    CanFrame f;
+    if (tx.poll(now, f)) {
+      tx.confirm(now);
+      RxOutput o = rx.onFrame(f, ctx, now);
+      if (isMessage(o)) msg = o.event.len == kMaxMessage;
+      if (o.hasReply) {
+        AddrId a; TFrame t; parse(o.reply, a, t);
+        if (t.kind == Kind::Flow && t.status == flow::kCts) { held = true; h = o.reply; }
+        else { TxOutcome r = tx.onFrame(o.reply, now); if (r.result != TxResult::None) out = r; }
+      }
+    } else if (held) {
+      held = false;
+      TEST_ASSERT_TRUE(rx.confirmFlow(h, now));
+      tx.onFrame(h, now);
+    } else {
+      break;
+    }
+  }
+  TEST_ASSERT_EQUAL(int(TxResult::Delivered), int(out.result));
+  TEST_ASSERT_TRUE(msg);
+}
+
+// ---- R45: unknown codes and a wrong tid8 change nothing ----
+
+static CanFrame rawCode(uint8_t fn, uint8_t code, uint32_t crc) {
+  CanFrame f = build(1, 0, 2, ackFrame(2, 0, crc));
+  AddrId a; a.prio = 2; a.func = fn; a.src = 1; a.dst = 0; a.tid8 = 2;
+  f.id = a.encode();
+  f.data[2] = code;
+  return f;
+}
+
+static void test_r45_unknown_codes_and_tid8() {
+  auto small = message(MsgType::Request, 2, 0, 0, {'{', '}'});
+  Sender s(0, 1);
+  s.start(small.data(), small.size(), 2);
+  CanFrame f; s.poll(0, f); s.confirm(0);
+  TEST_ASSERT_EQUAL(int(TxResult::None), int(s.onFrame(rawCode(func::kFlow, 3, 0), 0).result));
+  TEST_ASSERT_EQUAL(int(TxState::WaitFlow), int(s.state()));
+  s.onFrame(build(1, 0, 2, flowFrame(2, flow::kCts, 16, 0, 1)), 0);
+  while (s.poll(0, f)) s.confirm(0);
+  TEST_ASSERT_TRUE(s.committed());
+  uint32_t before = s.invalid;
+  TEST_ASSERT_EQUAL(int(TxResult::None), int(s.onFrame(rawCode(func::kAck, 6, s.crc()), 1).result));
+  TEST_ASSERT_EQUAL(int(TxResult::None), int(s.onFrame(rawCode(func::kAck, 254, s.crc()), 1).result));
+  TEST_ASSERT_EQUAL(int(TxResult::None), int(s.onFrame(rawCode(func::kRabort, 0, 0), 1).result));
+  TEST_ASSERT_EQUAL(before + 3, s.invalid);
+  TEST_ASSERT_TRUE(s.committed());
+  TEST_ASSERT_EQUAL(int(TxResult::Unknown), int(s.tick(kTAckMs).result));
+  // a valid ACK != 0 is still a refusal
+  Sender s2(0, 1);
+  s2.start(small.data(), small.size(), 2);
+  s2.poll(0, f); s2.confirm(0);
+  s2.onFrame(build(1, 0, 2, flowFrame(2, flow::kCts, 16, 0, 1)), 0);
+  while (s2.poll(0, f)) s2.confirm(0);
+  TxOutcome o = s2.onFrame(build(1, 0, 2, ackFrame(2, ack::kGenMismatch, s2.crc())), 1);
+  TEST_ASSERT_EQUAL(int(TxResult::Rejected), int(o.result));
+  TEST_ASSERT_EQUAL(ack::kGenMismatch, o.code);
+  // receiver: unknown XABORT reason, XSTART / XABORT with another tid8
+  RxContext ctx = moduleCtx();
+  Receiver rx(0, rxbuf, sizeof rxbuf);
+  CanFrame bad = build(0, 1, 7, xstart(60, 7, 0));
+  bad.id ^= 1;
+  RxOutput r = rx.onFrame(bad, ctx, 0);
+  TEST_ASSERT_FALSE(r.hasReply); TEST_ASSERT_EQUAL(int(RxKind::None), int(r.event.kind)); TEST_ASSERT_FALSE(rx.busy());
+  CanFrame cts = rx.onFrame(build(0, 1, 8, xstart(60, 8, 0)), ctx, 0).reply;
+  r = rx.onFrame(bad, ctx, 1);
+  TEST_ASSERT_EQUAL(int(RxKind::None), int(r.event.kind));
+  CanFrame p; TEST_ASSERT_TRUE(rx.pendingFlow(p));
+  TEST_ASSERT_EQUAL_MEMORY(cts.data, p.data, 8);
+  CanFrame ab = build(0, 1, 8, abortFrame(Kind::XAbort, 8, reason::kCancel));
+  ab.id ^= 3;
+  TEST_ASSERT_EQUAL(int(RxKind::None), int(rx.onFrame(ab, ctx, 2).event.kind));
+  CanFrame unk = build(0, 1, 8, abortFrame(Kind::XAbort, 8, reason::kCancel));
+  unk.data[2] = 9;
+  TEST_ASSERT_EQUAL(int(RxKind::None), int(rx.onFrame(unk, ctx, 2).event.kind));
+  TEST_ASSERT_TRUE(rx.busy());
+  TEST_ASSERT_EQUAL(4, rx.invalid);
+}
+
+// ---- R46: the delivered-message memory has a context and an end ----
+
+static void test_r46_cache_context_and_expiry() {
+  auto small = message(MsgType::Request, 9, 0, 0, {'{', '}'});
+  {
+    Link l(0, 1, moduleCtx());
+    l.tx.start(small.data(), small.size(), 9);
+    l.run();
+    RxContext c = moduleCtx(); c.panelGen += 1; c.srcAssigned = false;
+    RxOutput o = l.rx.onFrame(l.bus[0], c, l.now + 10);
+    TEST_ASSERT_NOT_EQUAL(int(RxKind::Duplicate), int(o.event.kind));
+    AddrId a; TFrame t;
+    TEST_ASSERT_FALSE(o.hasReply && parse(o.reply, a, t) && t.kind == Kind::Ack && t.status == ack::kOk);
+  }
+  {
+    Link l(0, 1, moduleCtx());
+    l.tx.start(small.data(), small.size(), 9);
+    l.run();
+    TEST_ASSERT_EQUAL(int(TxResult::Delivered), int(l.out.result));
+    l.now += 61000;
+    l.rx.tick(l.now);
+    l.out = TxOutcome();
+    l.events.clear();
+    TEST_ASSERT_TRUE(l.tx.start(small.data(), small.size(), 9));
+    l.run();
+    TEST_ASSERT_EQUAL(int(TxResult::Delivered), int(l.out.result));
+    TEST_ASSERT_EQUAL(1, l.messages());
+  }
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   loadCorpus();
@@ -360,5 +559,9 @@ int main(int, char**) {
   RUN_TEST(test_timers_cancel_generation_wrap);
   RUN_TEST(test_duplicate_xstart_and_supersede);
   RUN_TEST(test_reserved_written_zero_and_ignored);
+  RUN_TEST(test_r44_credit_only_from_transmitted_cts);
+  RUN_TEST(test_r44_full_size_with_deferred_grants);
+  RUN_TEST(test_r45_unknown_codes_and_tid8);
+  RUN_TEST(test_r46_cache_context_and_expiry);
   return UNITY_END();
 }

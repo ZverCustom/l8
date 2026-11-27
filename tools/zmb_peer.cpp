@@ -79,7 +79,10 @@ int main(int argc, char** argv) {
       TxOutcome o = tx.onFrame(f, now);
       if (o.result != TxResult::None) printf("O %s %u\n", resultName(o.result), o.code);
       RxOutput r = rx.onFrame(f, ctx, now);
-      if (r.hasReply) printFrame(r.reply);  // the ACK is written before the message is handed out
+      if (r.hasReply) {
+        printFrame(r.reply);  // written to the bus: the ACK before the message is handed out
+        rx.confirmFlow(r.reply, now);  // a CTS grants credit only now that it is transmitted
+      }
       if (r.event.kind == RxKind::Message) {
         printf("M ");
         for (size_t i = 0; i < r.event.len; i++) printf("%02X", rx.message()[i]);
