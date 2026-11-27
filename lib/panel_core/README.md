@@ -83,3 +83,44 @@ unchanged. Nothing is added beyond `l8proto`.
 | C11 | the 016 scenarios and the 022–024 faults on `panel_node`: each marked moved / not applicable / stays on the scripted node; the 022 reconciliation rule with the dispatcher's journal (`responded` ⇒ executed once, state changed once; `aborted`/`queued` ⇒ state unchanged) |
 | C12 | previous L8 suites and `l8_v3` unchanged (sections, symbols); D10 previous checks on the final commits |
 | C13 | ≥ 3 mutants (routing, address check, repeated execution) caught |
+
+## Task 028 (R71): freshness per field in the vehicle view — before the fix
+
+### How the existing code reads the fields (`src/`, unchanged)
+
+| Field | Readers | Freshness they use | "No data" today |
+|---|---|---|---|
+| rpm | `engineRunning()` (`vehicle.cpp:242`) → `power.cpp:35` (`engineCut`), `led_control.cpp:390` (`engineOff`); shift light `led_control.cpp:243`; rpm scale `led_control.cpp:235` | the one stamp `lastUpdate`, 3 000 ms (`vehicleDataFresh`) | `vehicle.cpp:173-177`: after 3 s the value is set to 0 |
+| speed | speed scale `led_control.cpp:228`; `hub.cpp:93` (status JSON) | **the rpm stamp** (`scaleFraction`: `source<=2 && !vehicleDataFresh()` → 0) | 0 (same reset) |
+| throttle | throttle scale `led_control.cpp:229`; `hub.cpp:93` | **the rpm stamp** | 0 (same reset) |
+| temp | `hub.cpp:93` only | none | none: the value stays (not reset) |
+
+So in the existing code one stamp serves all fields — fine for one CAN source that decodes
+them together, wrong for the panel, where §14.4 gives each field its own `m` and visible
+freshness of 300 ms. R71: `panelVehicle` filled speed/throttle/temp whenever the field
+had ever been received, under the rpm stamp.
+
+### Choice
+
+The view carries freshness per field **and** puts the existing "no data" value into a
+field that is not fresh:
+- `speed`, `throttle`: not fresh (`now − m > 300`) → 0, the existing "no data" (what the
+  stale reset and `scaleFraction` already produce). Existing readers stay correct unmodified.
+- `temp`: the existing code has no "no data" value (0 °C is a real temperature) → 0 and
+  `fresh` bit cleared; a reader must use the bit (stated for the firmware wiring).
+- `rpm`: the value and `lastUpdate` stay as they are (3 s rule): zeroing rpm at 300 ms
+  would change `engineRunning()` and the 3 s threshold, which must not change. The view
+  adds `rpmFresh` (300 ms) for scales/shift light; using it there is part of the later
+  firmware wiring.
+- `fresh` mask bits: 0 rpm, 1 speed, 2 throttle, 3 temp (coolant), each `now − m ≤ 300`
+  of that field in `panel_rx`.
+
+### Criteria
+
+| ID | Expected |
+|---|---|
+| V1 | the reviewer's scenario: one frame with all fields, then 5 s of frames with only rpm valid → speed 0, throttle 0, temp 0, their fresh bits clear; rpm fresh, `lastUpdate` young |
+| V2 | boundaries 300 / 301 ms for each of the seven fields (`panel_rx::fresh` for all; the view's bit and value for rpm, speed, throttle, temp) |
+| V3 | the reverse direction kept: a fresh speed does not move rpm's `lastUpdate` / `engineRunning`; `engineRunning` and the 3 s threshold unchanged (C7 still passes) |
+| V4 | mutant "the view ignores the field's freshness" caught |
+| V5 | the other outputs used by the firmware checked for one stamp serving several fields (result in the report) |
