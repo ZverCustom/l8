@@ -98,9 +98,50 @@ one).
 - No allocation, no clock of its own. A module sends one message at a time, so a small
   buffer is enough (the peer uses 256).
 
+## Discovery, module side (`zmb_disc.h`, §4.2)
+
+`ModuleDiscovery` implements rules 1–7 of §4.2, sans-IO.
+
+- **Rule 1**: no addressed frames until an ASSIGN with our MAC and the low byte of the
+  last PANEL_HB's panelGen.
+- **Rule 2**: wantAddr is the stored address when the stored panelId matches PANEL_HB's.
+- **ANNOUNCE timing** (single-shot):
+
+  | When | Delay |
+  |---|---|
+  | first attempt | 0..200 ms |
+  | lost arbitration | 1..20 ms |
+  | bus error | 50..250 ms |
+  | sent, no ASSIGN | 1000 + 0..250 ms |
+
+  5 bus errors in a row count `announceErrors`.
+- **BEACON**: every 1000 ± 125 ms.
+- **Our address in another MAC's BEACON**: back to ANNOUNCE with wantAddr 0.
+- **RELEASE**: forget the address.
+- **New panelGen**: forget the confirmation, keep the address as wantAddr.
+- **`generation()`** grows on every loss of the address; the owner then drops its
+  transport state.
+- **Randomness** comes from a caller function, so tests are deterministic.
+
+The native tests cover trace A of §4.4 and rules 2/5/6/7.
+
+## Gateway test participant (`tools/zmb_node.cpp`)
+
+The module process for the D10 gateway integration tests (task 016), built by
+`tools/build_zmb_node.sh` with ASan/UBSan. It is used by `scripts/zmb-gateway.sh` of the
+d7-d10 repository.
+
+- It uses `ModuleDiscovery`, `Sender`, `Receiver` and `TidTable` (lease API, reset per
+  panelGen).
+- It handles HELLO/HELLO_ACK (`matchReply`) and REQUEST → RESPONSE (reqTid, reqCrc).
+- It sends STATUS_A every 500 ms and BEACON.
+- It reads line commands on stdin: `T`, `F`, `R` for the single-shot result, `REBOOT`,
+  `MUTE`, `SILENT`.
+- Its business answers (info, status, preview, save, get_config, apply) are scripted.
+  They prove the route, not the firmware dispatcher, flash writes or power outputs.
+
 ## Not here (next U3b steps)
 
-- discovery;
 - the TWAI adapter and panel mode (U3b-l8), H_max;
 - the MCU link (U3b-mcu).
 
@@ -111,4 +152,5 @@ pio test -e native -f test_zmb          # corpus + traces
 pio test -e native_zmb_san              # the same with ASan + UBSan
 tools/build_zmb_peer.sh                 # interop peer (ASan/UBSan) for d7-d10 scripts/zmb-interop.sh
                                         # (its RESP command answers with a TidTable tid)
+tools/build_zmb_node.sh                 # gateway test module process (d7-d10 scripts/zmb-gateway.sh)
 ```
