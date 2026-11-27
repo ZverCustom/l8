@@ -81,11 +81,24 @@ frame → `refuse()`, never `confirm()`.
 - FLOW CTS with another `expected` or `block = 0` is ignored; N_Bs decides.
 - A message from a `src` not assigned in the current panelGen → ACK GEN_MISMATCH.
 
+## Transaction ids (`TidTable`, §5.5)
+
+The module's u16 counter for its messages to the panel, one per panelGen (`reset` on a new
+one).
+- **Ring in allocation order over a caller buffer** of `TidEntry` (8 bytes each; future
+  PSRAM). Entry i is the allocation `nextSerial − len + i`, tid = serial & 0xFFFF.
+- The oldest entry leaves only when `finish`ed and its last frame is ≥ 60 s old; `touch`
+  moves "last" on every frame. The counter only moves forward.
+- **Full ring** → `alloc` returns false: the module waits (`freeAt`), never reuses a tid
+  early. An active entry never ages out.
+- A stale serial (its entry left) changes nothing. Wrap of u16 and of the u32 clock is
+  handled.
+- No allocation, no clock of its own. A module sends one message at a time, so a small
+  buffer is enough (the peer uses 256).
+
 ## Not here (next U3b steps)
 
-- tid manager with the 60 s quarantine;
-- multi-module dispatch;
-- bus budget/prepayment, priorities, discovery;
+- discovery;
 - the TWAI adapter and panel mode (U3b-l8), H_max;
 - the MCU link (U3b-mcu).
 
@@ -95,4 +108,5 @@ frame → `refuse()`, never `confirm()`.
 pio test -e native -f test_zmb          # corpus + traces
 pio test -e native_zmb_san              # the same with ASan + UBSan
 tools/build_zmb_peer.sh                 # interop peer (ASan/UBSan) for d7-d10 scripts/zmb-interop.sh
+                                        # (its RESP command answers with a TidTable tid)
 ```

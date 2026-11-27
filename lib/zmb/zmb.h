@@ -228,4 +228,42 @@ class Receiver {
 // RESPONSE/JSON-id matching belongs to the panel (Rust).
 bool matchReply(const Header& h, uint16_t tid, uint32_t crc, uint32_t panelGen, uint32_t bootTag);
 
+// ---- transaction ids (§5.5), module side ----
+
+// A u16 tid is not reused for the same receiver within 60 s after the last frame of its
+// transaction. Ring in allocation order over a caller buffer (future PSRAM): entry i is the
+// allocation with serial nextSerial − len + i, tid = serial & 0xFFFF. The oldest entry leaves
+// only when finished and ≥ 60 s old; the counter only moves forward. A full ring (cap ≤ 65 536
+// live entries) means wait — never an unsafe reuse. No allocation, no clock of its own.
+constexpr uint32_t kTidQuarantineMs = 60000;
+
+struct TidEntry {
+  uint32_t last;
+  uint8_t active;
+};
+
+class TidTable {
+ public:
+  TidTable(TidEntry* buf, size_t cap, uint16_t first = 0)
+      : buf_(buf), cap_(cap < 65536 ? (cap ? cap : 1) : 65536), nextSerial_(first) {}
+  // A fresh tid, or false: wait (freeAt tells until when, if the oldest is not active).
+  bool alloc(uint32_t now, uint16_t& tid, uint32_t& serial);
+  // A frame of this transaction at `now` / it ended with its last frame at `now`.
+  // False for a stale serial (its entry already left).
+  bool touch(uint32_t serial, uint32_t now);
+  bool finish(uint32_t serial, uint32_t now);
+  bool freeAt(uint32_t& at) const;
+  // New panelGen: a new counter space.
+  void reset(uint16_t first = 0) { head_ = len_ = 0; nextSerial_ = first; }
+  size_t live() const { return len_; }
+
+ private:
+  void prune(uint32_t now);
+  TidEntry* entry(uint32_t serial);
+  TidEntry* buf_;
+  size_t cap_;
+  size_t head_ = 0, len_ = 0;
+  uint32_t nextSerial_;
+};
+
 }  // namespace zmb

@@ -2,10 +2,13 @@
 // implementation (the Rust core in d7-d10) can exchange real frames with it.
 // argv: local peer panelGen(hex) ownBootTag(hex)
 // stdin: "T <ms>" time | "F <id> <data16>" frame from the bus | "SEND <tid> <hex>" start a
-//        message | "POLL" offer+confirm every frame due now | "TICK" timers. Each command
-//        is answered by zero or more lines and a final ".".
+//        message | "RESP <hex json>" answer the last delivered REQUEST: RESPONSE header
+//        with a tid from TidTable, reqTid/reqCrc of that request | "POLL" offer+confirm
+//        every frame due now | "TICK" timers. Each command is answered by zero or more
+//        lines and a final ".".
 // stdout: "F <id> <data16>" frame to the bus | "O <result> <code>" sender outcome |
-//         "M <hex>" delivered message | "E <kind> <tid> <code>" receiver event.
+//         "M <hex>" delivered message | "E <kind> <tid> <code>" receiver event |
+//         "E tidwait 0 0" no tid free yet (the module waits, §5.5).
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +56,10 @@ static const char* kindName(RxKind k) {
 
 static uint8_t rxbuf[kMaxMessage];
 static std::vector<uint8_t> txmsg;
+static TidEntry tidbuf[256];
+static std::vector<uint8_t> lastReq;
+static bool haveLease = false;
+static uint32_t lease = 0;
 
 int main(int argc, char** argv) {
   if (argc < 5) return 2;
@@ -64,6 +71,7 @@ int main(int argc, char** argv) {
   ctx.ownBootTag = uint32_t(strtoul(argv[4], nullptr, 16));
   Sender tx(local, peer);
   Receiver rx(peer, rxbuf, sizeof rxbuf);
+  TidTable tids(tidbuf, sizeof tidbuf / sizeof tidbuf[0], 0x0057);
   uint32_t now = 0;
   static char line[60000];
   while (fgets(line, sizeof line, stdin)) {
@@ -77,13 +85,17 @@ int main(int argc, char** argv) {
       auto d = hexBytes(strtok(nullptr, " \r\n"));
       memcpy(f.data, d.data(), d.size() < 8 ? d.size() : 8);
       TxOutcome o = tx.onFrame(f, now);
-      if (o.result != TxResult::None) printf("O %s %u\n", resultName(o.result), o.code);
+      if (o.result != TxResult::None) {
+        printf("O %s %u\n", resultName(o.result), o.code);
+        if (haveLease) tids.finish(lease, now), haveLease = false;
+      }
       RxOutput r = rx.onFrame(f, ctx, now);
       if (r.hasReply) {
         printFrame(r.reply);  // written to the bus: the ACK before the message is handed out
         if (r.flow) rx.confirmFlow(r.flow, now);  // a CTS grants credit only now that it is transmitted
       }
       if (r.event.kind == RxKind::Message) {
+        lastReq.assign(rx.message(), rx.message() + r.event.len);
         printf("M ");
         for (size_t i = 0; i < r.event.len; i++) printf("%02X", rx.message()[i]);
         printf("\n");
@@ -94,15 +106,36 @@ int main(int argc, char** argv) {
       uint16_t tid = uint16_t(strtoul(strtok(nullptr, " \r\n"), nullptr, 16));
       txmsg = hexBytes(strtok(nullptr, " \r\n"));
       if (!tx.start(txmsg.data(), txmsg.size(), tid)) printf("O refused 0\n");
+    } else if (!strcmp(cmd, "RESP")) {
+      std::vector<uint8_t> json = hexBytes(strtok(nullptr, " \r\n"));
+      Header q;
+      uint16_t tid; uint32_t serial;
+      if (!Header::decode(lastReq.data(), lastReq.size(), q)) {
+        printf("E noreq 0 0\n");
+      } else if (!tids.alloc(now, tid, serial)) {
+        printf("E tidwait 0 0\n");
+      } else {
+        Header h; h.mtype = uint8_t(MsgType::Response); h.tid = tid; h.reqTid = q.tid;
+        h.panelGen = ctx.panelGen; h.bootTag = ctx.ownBootTag; h.reqCrc = crc32(lastReq.data(), lastReq.size());
+        txmsg.assign(kHeaderLen, 0);
+        h.encode(txmsg.data());
+        txmsg.insert(txmsg.end(), json.begin(), json.end());
+        if (tx.start(txmsg.data(), txmsg.size(), tid)) { lease = serial; haveLease = true; }
+        else { tids.finish(serial, now); printf("O refused 0\n"); }
+      }
     } else if (!strcmp(cmd, "POLL")) {
       CanFrame f;
       while (tx.poll(now, f)) {
         tx.confirm(now);
+        if (haveLease) tids.touch(lease, now);
         printFrame(f);
       }
     } else if (!strcmp(cmd, "TICK")) {
       TxOutcome o = tx.tick(now);
-      if (o.result != TxResult::None) printf("O %s %u\n", resultName(o.result), o.code);
+      if (o.result != TxResult::None) {
+        printf("O %s %u\n", resultName(o.result), o.code);
+        if (haveLease) tids.finish(lease, now), haveLease = false;
+      }
       RxEvent e = rx.tick(now);
       if (e.kind != RxKind::None) printf("E %s %u %u\n", kindName(e.kind), e.tid, e.code);
     }

@@ -424,4 +424,55 @@ bool matchReply(const Header& h, uint16_t tid, uint32_t crc, uint32_t panelGen, 
   return h.reqTid == tid && h.reqCrc == crc && h.panelGen == panelGen && h.bootTag == bootTag;
 }
 
+// ---- TidTable ----
+
+void TidTable::prune(uint32_t now) {
+  while (len_ > 0) {
+    const TidEntry& e = buf_[head_];
+    if (e.active || !expired(e.last + kTidQuarantineMs, now)) break;
+    head_ = (head_ + 1) % cap_;
+    len_--;
+  }
+}
+
+bool TidTable::alloc(uint32_t now, uint16_t& tid, uint32_t& serial) {
+  prune(now);
+  if (len_ >= cap_) return false;
+  serial = nextSerial_++;
+  tid = uint16_t(serial & 0xFFFF);
+  TidEntry& e = buf_[(head_ + len_) % cap_];
+  e.last = now;
+  e.active = 1;
+  len_++;
+  return true;
+}
+
+TidEntry* TidTable::entry(uint32_t serial) {
+  uint32_t oldest = nextSerial_ - uint32_t(len_);
+  uint32_t i = serial - oldest;
+  if (i >= len_) return nullptr;
+  return &buf_[(head_ + i) % cap_];
+}
+
+bool TidTable::touch(uint32_t serial, uint32_t now) {
+  TidEntry* e = entry(serial);
+  if (!e) return false;
+  e->last = now;
+  return true;
+}
+
+bool TidTable::finish(uint32_t serial, uint32_t now) {
+  TidEntry* e = entry(serial);
+  if (!e) return false;
+  e->last = now;
+  e->active = 0;
+  return true;
+}
+
+bool TidTable::freeAt(uint32_t& at) const {
+  if (len_ == 0 || buf_[head_].active) return false;
+  at = buf_[head_].last + kTidQuarantineMs;
+  return true;
+}
+
 }  // namespace zmb
