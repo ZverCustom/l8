@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include <atomic>
+
 namespace zmb {
 
 namespace {
@@ -435,11 +437,19 @@ void TidTable::prune(uint32_t now) {
   }
 }
 
-bool TidTable::alloc(uint32_t now, uint16_t& tid, uint32_t& serial) {
+static std::atomic<uint32_t> tidOwners{1};
+
+TidTable::TidTable(TidEntry* buf, size_t cap, uint16_t first)
+    : buf_(buf), cap_(cap < 65536 ? (cap ? cap : 1) : 65536), nextSerial_(first),
+      owner_(tidOwners.fetch_add(1, std::memory_order_relaxed)) {}
+
+bool TidTable::alloc(uint32_t now, TidLease& lease) {
   prune(now);
   if (len_ >= cap_) return false;
-  serial = nextSerial_++;
-  tid = uint16_t(serial & 0xFFFF);
+  lease.owner = owner_;
+  lease.gen = gen_;
+  lease.serial = nextSerial_++;
+  lease.tid = uint16_t(lease.serial & 0xFFFF);
   TidEntry& e = buf_[(head_ + len_) % cap_];
   e.last = now;
   e.active = 1;
@@ -447,22 +457,23 @@ bool TidTable::alloc(uint32_t now, uint16_t& tid, uint32_t& serial) {
   return true;
 }
 
-TidEntry* TidTable::entry(uint32_t serial) {
+TidEntry* TidTable::entry(const TidLease& lease) {
+  if (lease.owner != owner_ || lease.gen != gen_) return nullptr;
   uint32_t oldest = nextSerial_ - uint32_t(len_);
-  uint32_t i = serial - oldest;
+  uint32_t i = lease.serial - oldest;
   if (i >= len_) return nullptr;
   return &buf_[(head_ + i) % cap_];
 }
 
-bool TidTable::touch(uint32_t serial, uint32_t now) {
-  TidEntry* e = entry(serial);
+bool TidTable::touch(const TidLease& lease, uint32_t now) {
+  TidEntry* e = entry(lease);
   if (!e) return false;
   e->last = now;
   return true;
 }
 
-bool TidTable::finish(uint32_t serial, uint32_t now) {
-  TidEntry* e = entry(serial);
+bool TidTable::finish(const TidLease& lease, uint32_t now) {
+  TidEntry* e = entry(lease);
   if (!e) return false;
   e->last = now;
   e->active = 0;

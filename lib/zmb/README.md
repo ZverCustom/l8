@@ -91,8 +91,10 @@ one).
   moves "last" on every frame. The counter only moves forward.
 - **Full ring** → `alloc` returns false: the module waits (`freeAt`), never reuses a tid
   early. An active entry never ages out.
-- A stale serial (its entry left) changes nothing. Wrap of u16 and of the u32 clock is
-  handled.
+- `alloc` returns a `TidLease` (table instance, reset generation, serial, tid).
+  `touch`/`finish` take the lease. A lease of another table instance (even over the same
+  buffer), of a counter space before `reset`, or of an entry that already left changes
+  nothing. Wrap of u16 and of the u32 clock is handled.
 - No allocation, no clock of its own. A module sends one message at a time, so a small
   buffer is enough (the peer uses 256).
 

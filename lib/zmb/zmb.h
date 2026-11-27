@@ -242,28 +242,38 @@ struct TidEntry {
   uint8_t active;
 };
 
+// Proof of one allocation: table instance, counter space (reset generation), serial.
+// A lease of another table, an earlier space or an entry that already left changes nothing.
+struct TidLease {
+  uint32_t owner = 0;
+  uint32_t gen = 0;
+  uint32_t serial = 0;
+  uint16_t tid = 0;
+};
+
 class TidTable {
  public:
-  TidTable(TidEntry* buf, size_t cap, uint16_t first = 0)
-      : buf_(buf), cap_(cap < 65536 ? (cap ? cap : 1) : 65536), nextSerial_(first) {}
+  TidTable(TidEntry* buf, size_t cap, uint16_t first = 0);
   // A fresh tid, or false: wait (freeAt tells until when, if the oldest is not active).
-  bool alloc(uint32_t now, uint16_t& tid, uint32_t& serial);
+  bool alloc(uint32_t now, TidLease& lease);
   // A frame of this transaction at `now` / it ended with its last frame at `now`.
-  // False for a stale serial (its entry already left).
-  bool touch(uint32_t serial, uint32_t now);
-  bool finish(uint32_t serial, uint32_t now);
+  // False for a stale lease.
+  bool touch(const TidLease& lease, uint32_t now);
+  bool finish(const TidLease& lease, uint32_t now);
   bool freeAt(uint32_t& at) const;
-  // New panelGen: a new counter space.
-  void reset(uint16_t first = 0) { head_ = len_ = 0; nextSerial_ = first; }
+  // New panelGen: a new counter space; every earlier lease becomes stale.
+  void reset(uint16_t first = 0) { head_ = len_ = 0; nextSerial_ = first; gen_++; }
   size_t live() const { return len_; }
 
  private:
   void prune(uint32_t now);
-  TidEntry* entry(uint32_t serial);
+  TidEntry* entry(const TidLease& lease);
   TidEntry* buf_;
   size_t cap_;
   size_t head_ = 0, len_ = 0;
   uint32_t nextSerial_;
+  uint32_t owner_;
+  uint32_t gen_ = 0;
 };
 
 }  // namespace zmb

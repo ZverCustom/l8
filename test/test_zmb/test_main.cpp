@@ -635,44 +635,74 @@ static TidEntry tidAll[65536];
 
 static void test_tid_all_taken_waits_and_quarantine_from_last_frame() {
   TidTable t(tidAll, 65536, 0);
-  uint16_t tid; uint32_t first, s;
-  TEST_ASSERT_TRUE(t.alloc(0, tid, first));
-  TEST_ASSERT_EQUAL(0, tid);
+  TidLease first, s;
+  TEST_ASSERT_TRUE(t.alloc(0, first));
+  TEST_ASSERT_EQUAL(0, first.tid);
   for (uint32_t i = 1; i < 65536; i++) {
-    TEST_ASSERT_TRUE(t.alloc(i / 1000, tid, s));
+    TEST_ASSERT_TRUE(t.alloc(i / 1000, s));
     t.finish(s, i / 1000);
   }
-  TEST_ASSERT_FALSE(t.alloc(100, tid, s));
-  TEST_ASSERT_FALSE(t.alloc(65000, tid, s));  // the oldest is active: no age-out from its XSTART
+  TEST_ASSERT_FALSE(t.alloc(100, s));
+  TEST_ASSERT_FALSE(t.alloc(65000, s));  // the oldest is active: no age-out from its XSTART
   uint32_t at;
   TEST_ASSERT_FALSE(t.freeAt(at));
   TEST_ASSERT_TRUE(t.touch(first, 70000));
   TEST_ASSERT_TRUE(t.finish(first, 80000));
   TEST_ASSERT_TRUE(t.freeAt(at));
   TEST_ASSERT_EQUAL_UINT32(80000 + kTidQuarantineMs, at);
-  TEST_ASSERT_FALSE(t.alloc(80000 + kTidQuarantineMs - 1, tid, s));
-  TEST_ASSERT_TRUE(t.alloc(80000 + kTidQuarantineMs, tid, s));
-  TEST_ASSERT_EQUAL(0, tid);
+  TEST_ASSERT_FALSE(t.alloc(80000 + kTidQuarantineMs - 1, s));
+  TEST_ASSERT_TRUE(t.alloc(80000 + kTidQuarantineMs, s));
+  TEST_ASSERT_EQUAL(0, s.tid);
 }
 
 static void test_tid_wrap_and_stale_serials() {
   TidEntry b[1];
   TidTable t(b, 1, 65535);
-  uint16_t tid; uint32_t a, c;
+  TidLease a, c;
   uint32_t start = 0xFFFFFFFFu - 100;
-  TEST_ASSERT_TRUE(t.alloc(start, tid, a));
-  TEST_ASSERT_EQUAL(65535, tid);
+  TEST_ASSERT_TRUE(t.alloc(start, a));
+  TEST_ASSERT_EQUAL(65535, a.tid);
   t.finish(a, start);
-  TEST_ASSERT_FALSE(t.alloc(start + 59999, tid, c));
-  TEST_ASSERT_TRUE(t.alloc(start + 60000, tid, c));
-  TEST_ASSERT_EQUAL(0, tid);  // u16 wraps, u32 clock wrapped too
-  TEST_ASSERT_FALSE(t.finish(a, start));  // the old entry left: its serial changes nothing
+  TEST_ASSERT_FALSE(t.alloc(start + 59999, c));
+  TEST_ASSERT_TRUE(t.alloc(start + 60000, c));
+  TEST_ASSERT_EQUAL(0, c.tid);  // u16 wraps, u32 clock wrapped too
+  TEST_ASSERT_FALSE(t.finish(a, start));  // the old entry left: its lease changes nothing
   TEST_ASSERT_TRUE(t.touch(c, 5));
   // a new panelGen: a new counter space
   t.reset(0x0057);
   TEST_ASSERT_FALSE(t.touch(c, 6));
-  TEST_ASSERT_TRUE(t.alloc(7, tid, c));
-  TEST_ASSERT_EQUAL(0x0057, tid);
+  TEST_ASSERT_TRUE(t.alloc(7, c));
+  TEST_ASSERT_EQUAL(0x0057, c.tid);
+}
+
+// R49: after reset (same serial again) and after re-creating the table over the same
+// buffer, old leases change nothing; current ones work; the active entry stays taken.
+static void test_r49_old_lease_after_reset_or_new_owner() {
+  TidEntry b[1];
+  TidTable t(b, 1);
+  TidLease old, cur;
+  TEST_ASSERT_TRUE(t.alloc(0, old));
+  t.reset();
+  TEST_ASSERT_TRUE(t.alloc(1, cur));
+  TEST_ASSERT_EQUAL_UINT32(old.serial, cur.serial);  // same serial, other space
+  TEST_ASSERT_FALSE(t.finish(old, 2));
+  TEST_ASSERT_FALSE(t.touch(old, 2));
+  uint32_t at;
+  TEST_ASSERT_FALSE(t.freeAt(at));  // the new entry is still active
+  TidLease x;
+  TEST_ASSERT_FALSE(t.alloc(70000, x));  // and keeps its tid taken
+  TEST_ASSERT_TRUE(t.touch(cur, 3));
+  TEST_ASSERT_TRUE(t.finish(cur, 4));
+  TEST_ASSERT_TRUE(t.freeAt(at));
+  TEST_ASSERT_EQUAL_UINT32(4 + kTidQuarantineMs, at);
+  // a new owner over the same buffer: leases of the previous table are foreign
+  TidTable u(b, 1);
+  TidLease mine;
+  TEST_ASSERT_TRUE(u.alloc(5, mine));
+  TEST_ASSERT_EQUAL_UINT32(cur.serial, mine.serial);
+  TEST_ASSERT_FALSE(u.finish(cur, 6));
+  TEST_ASSERT_FALSE(u.freeAt(at));
+  TEST_ASSERT_TRUE(u.finish(mine, 7));
 }
 
 int main(int, char**) {
@@ -695,5 +725,6 @@ int main(int, char**) {
   RUN_TEST(test_r44_ticket_identity);
   RUN_TEST(test_tid_all_taken_waits_and_quarantine_from_last_frame);
   RUN_TEST(test_tid_wrap_and_stale_serials);
+  RUN_TEST(test_r49_old_lease_after_reset_or_new_owner);
   return UNITY_END();
 }

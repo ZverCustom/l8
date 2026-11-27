@@ -59,7 +59,7 @@ static std::vector<uint8_t> txmsg;
 static TidEntry tidbuf[256];
 static std::vector<uint8_t> lastReq;
 static bool haveLease = false;
-static uint32_t lease = 0;
+static TidLease lease;
 
 int main(int argc, char** argv) {
   if (argc < 5) return 2;
@@ -109,19 +109,19 @@ int main(int argc, char** argv) {
     } else if (!strcmp(cmd, "RESP")) {
       std::vector<uint8_t> json = hexBytes(strtok(nullptr, " \r\n"));
       Header q;
-      uint16_t tid; uint32_t serial;
+      TidLease got;
       if (!Header::decode(lastReq.data(), lastReq.size(), q)) {
         printf("E noreq 0 0\n");
-      } else if (!tids.alloc(now, tid, serial)) {
+      } else if (!tids.alloc(now, got)) {
         printf("E tidwait 0 0\n");
       } else {
-        Header h; h.mtype = uint8_t(MsgType::Response); h.tid = tid; h.reqTid = q.tid;
+        Header h; h.mtype = uint8_t(MsgType::Response); h.tid = got.tid; h.reqTid = q.tid;
         h.panelGen = ctx.panelGen; h.bootTag = ctx.ownBootTag; h.reqCrc = crc32(lastReq.data(), lastReq.size());
         txmsg.assign(kHeaderLen, 0);
         h.encode(txmsg.data());
         txmsg.insert(txmsg.end(), json.begin(), json.end());
-        if (tx.start(txmsg.data(), txmsg.size(), tid)) { lease = serial; haveLease = true; }
-        else { tids.finish(serial, now); printf("O refused 0\n"); }
+        if (tx.start(txmsg.data(), txmsg.size(), got.tid)) { lease = got; haveLease = true; }
+        else { tids.finish(got, now); printf("O refused 0\n"); }
       }
     } else if (!strcmp(cmd, "POLL")) {
       CanFrame f;
