@@ -178,19 +178,67 @@ static void installHooks() {
   h.otaBusy = [] { return false; };
   h.powerReady = [] { return true; };
   h.imuOk = [] { return true; };
-  h.info = [](JsonObject o) {
-    o["product"] = "ZVER L8";
-    o["deviceId"] = g->deviceId.c_str();
-    o["bootId"] = g->bootHex.c_str();
+  // The same fields as the firmware's infoFill/statusFill (src/hub/hub.cpp): identity,
+  // protocol, capabilities and limits; what the host does not have is neutral (no OTA, no
+  // IMU, outputs off). Task 029: the app's client checks this descriptor by contract.
+  h.info = [](JsonObject d) {
+    d["product"] = "ZVER L8";
+    d["hardware"] = 3;
+    d["deviceId"] = g->deviceId.c_str();
+    d["bootId"] = g->bootHex.c_str();
+    d["firmware"] = "l8 panel_node 0.1";
+    d["build"] = "host";
+    auto protocol = d.createNestedObject("protocol");
+    protocol["major"] = 1;
+    protocol["minor"] = 0;
+    d["configSchema"] = L8_CONFIG_SCHEMA;
+    auto transports = d.createNestedArray("transports");
+    transports.add("http");
+    transports.add("usb");
+    auto caps = d.createNestedArray("capabilities");
+    for (const char* c : {"info.v1", "channel.reason", "config.savedRevision", "commands.v1", "preview.v1", "status.sse"}) caps.add(c);
+    auto l = d.createNestedObject("limits");
+    l["channels"] = 8;
+    l["maxCommandBytes"] = l8proto::MAX_COMMAND_BYTES;
+    l["maxConfigBytes"] = L8_MAX_CONFIG_BYTES;
+    l["maxLedCount"] = 1000;
+    l["maxChannelAmps"] = L8_MAX_CHANNEL_AMPS;
+    l["previewLeaseMs"] = L8_PREVIEW_LEASE_MS;
+    l["previewIntervalMs"] = 100;
+    l["statusIntervalMs"] = 500;
+    l["maxSseClients"] = 4;
   };
-  h.status = [](JsonObject o) {
-    o["configRevision"] = settingsRevision();
+  h.status = [](JsonObject d) {
+    d["configRevision"] = settingsRevision();
     uint32_t s;
-    if (settingsSavedRevision(s)) o["savedRevision"] = s;
-    else o["savedRevision"] = nullptr;
-    o["bootId"] = g->bootHex.c_str();
-    o["master"] = drive.masterOn;
-    o["previewActive"] = settingsPreviewActive();
+    if (settingsSavedRevision(s)) d["savedRevision"] = s;
+    else d["savedRevision"] = nullptr;
+    d["bootId"] = g->bootHex.c_str();
+    d["previewActive"] = settingsPreviewActive();
+    if (settingsPreviewActive()) d["previewOwner"] = settingsPreviewOwner();
+    else d["previewOwner"] = nullptr;
+    d["previewRemainingMs"] = settingsPreviewRemainingMs();
+    d["build"] = "host";
+    d["product"] = "ZVER L8";
+    d["hardware"] = 3;
+    d["firmware"] = "l8 panel_node 0.1";
+    d["uptimeMs"] = millis();
+    d["master"] = drive.masterOn;
+    d["vbat"] = 0;
+    d["ign"] = false;
+    d["ioOk"] = true;
+    d["ioFault"] = false;
+    d["totalAmps"] = 0;
+    d["network"] = "host";
+    d["ip"] = "";
+    auto channels = d.createNestedArray("channels");
+    for (int i = 0; i < 8; ++i) {
+      auto c = channels.createNestedObject();
+      c["on"] = false;
+      c["amps"] = 0;
+      c["fault"] = "";
+      c["reason"] = "host";
+    }
   };
   l8proto::setHooks(h);
 }
