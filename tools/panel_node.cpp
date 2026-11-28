@@ -265,6 +265,7 @@ int main(int argc, char** argv) {
     if (!strcmp(cmd, "T")) {
       n.now = uint32_t(strtoul(strtok_r(nullptr, " \r\n", &rest), nullptr, 10));
       testMillis = n.now;
+      settingsTick();  // as main.cpp's loop: preview lease expiry, delayed flash write
       n.core->tick(n.now);
     } else if (!strcmp(cmd, "F")) {
       zmb::CanFrame f;
