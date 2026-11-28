@@ -80,7 +80,8 @@ Poll QueueStamp::poll(const Snapshot& s) {
   if (s.overrun) {
     a_ = Anchor{};
   } else if (s.empty) {
-    a_ = Anchor{true, s.t0};
+    a_.has = true;  // C++11 (the firmware's gnu++11)
+    a_.t = s.t0;
   }
   Poll p;
   p.a_ = a_;

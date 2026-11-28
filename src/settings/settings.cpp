@@ -132,7 +132,7 @@ bool settingsApply(JsonVariantConst value,String& error) {
     for(int i=0;i<8;++i) { auto s=o["strips"][i].as<JsonObjectConst>(); if(!decodeStrip(s,next.stripSettings[i],next.numLeds[i],next.can_setting.speed,o["schema"])||!number(s["maxAmps"],.5,L8_MAX_CHANNEL_AMPS)||!number(s["currentCal"],.3,3)) return fail("Invalid strip setting (8..1000 LEDs, 0.5..5 A)"); next.channelMaxAmps[i]=s["maxAmps"]; next.channelCal[i]=s["currentCal"]; }
     if(!o["inputs"].is<JsonArrayConst>()||o["inputs"].size()!=3) return fail("Expected three inputs");
     for(int i=0;i<3;++i) { auto p=o["inputs"][i]; if(!integer(p["mode"],0,2)||!number(p["low"],0,16)||!number(p["high"],0,16)||p["high"].as<float>()<=p["low"].as<float>()||!number(p["thresholdMv"],0,3100)) return fail("Invalid input setting"); next.inputs[i]={p["mode"],p["low"],p["high"],p["thresholdMv"]}; }
-    if(!integer(o["can"]["mode"],0,3)||!integer(o["can"]["bitrate"],0,5)) return fail("Invalid CAN setting");
+    if(!integer(o["can"]["mode"],0,4)||!integer(o["can"]["bitrate"],0,5)) return fail("Invalid CAN setting");
     next.canMode=o["can"]["mode"]; next.bitrate=o["can"]["bitrate"];
     auto net=o["network"]; if(!net["ssid"].is<const char*>()||strlen(net["ssid"])>32||!net["password"].is<const char*>()||strlen(net["password"])>64||!net["keepPassword"].is<bool>()) return fail("Invalid Wi-Fi setting");
     strlcpy(next.wifiSsid,net["ssid"],sizeof(next.wifiSsid));

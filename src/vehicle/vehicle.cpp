@@ -1,8 +1,12 @@
 #include "vehicle.h"
 #include "system/system.h"
 #include "kline/kline.h"
+#include "mode_plan.h"
+#include "vehicle_rules.h"
+#include "panel_mode/panel_glue.h"
 
 VehicleData vehicle;
+uint8_t vehicleFresh = 0;
 int canMode = CAN_MODE_OBD2;
 int canBitrateSel = 0;
 
@@ -51,8 +55,7 @@ void vehicleSetBitrate(int sel) {
     brWindowStart = millis();
     brWindowFrames = 0;
     if (!canBus) return;
-    int idx = canBitrateSel ? canBitrateSel - 1 : BR_500K;
-    canBus->restart(canMode != CAN_MODE_OBD2, idx);
+    canBus->restart(vmode::plan(canMode).listenOnly, vmode::bitrateFor(canMode, canBitrateSel));
     brWindowErrStart = canBus->busErrors();
 }
 
@@ -64,7 +67,7 @@ String canBitrateString() {
 }
 
 static void bitrateScanTick(unsigned long now) {
-    if (canBitrateSel != 0 || canMode == CAN_MODE_OBD2 || canMode == CAN_MODE_DS2 || !canBus) return;
+    if (canBitrateSel != 0 || !vmode::plan(canMode).autoBitrate || !canBus) return;
     if (now - brWindowStart < BR_WINDOW) return;
     unsigned long errs = canBus->busErrors() - brWindowErrStart;
     if (brWindowFrames > 0) {
@@ -86,18 +89,18 @@ static void bitrateScanTick(unsigned long now) {
 }
 
 void vehicleSetMode(int mode) {
+    if (!vmode::plan(mode).panel) panelModeExit();
     canMode = mode;
     sniffUsed = 0;
     brLocked = false;
     brWindowStart = millis();
     brWindowFrames = 0;
     if (canBus) {
-        int idx = canBitrateSel ? canBitrateSel - 1 : BR_500K;
-        canBus->restart(mode != CAN_MODE_OBD2, idx);
+        canBus->restart(vmode::plan(mode).listenOnly, vmode::bitrateFor(mode, canBitrateSel));
         brWindowErrStart = canBus->busErrors();
     }
-    static const char* names[] = {"OBD2", "BMW MS43", "Sniffer", "BMW MS43 K-line"};
-    sysLog(String("Data source: ") + names[constrain(mode, 0, 3)]);
+    static const char* names[] = {"OBD2", "BMW MS43", "Sniffer", "BMW MS43 K-line", "Panel D10"};
+    sysLog(String("Data source: ") + names[constrain(mode, 0, 4)]);
 }
 
 // BMW E46 / MS43 PT-CAN, 500 kbit
@@ -154,7 +157,8 @@ static void sniffFrame(const twai_message_t& f) {
 void vehicleTick() {
     unsigned long now = millis();
     static unsigned long lastDiag = 0;
-    if (canBus && canMode != CAN_MODE_OBD2 && canMode != CAN_MODE_DS2 && now - lastDiag >= 5000) {
+    const vmode::Plan plan = vmode::plan(canMode);
+    if (canBus && plan.readFrames && now - lastDiag >= 5000) {
         lastDiag = now;
         Serial.println("CAN " + canBus->diagString() + " fps=" + String(framesPerSec));
     }
@@ -176,11 +180,17 @@ void vehicleTick() {
         vehicle.throttle = 0;
     }
 
-    if (canMode == CAN_MODE_OBD2) {
+    if (plan.panel) {
+        // panel mode (§15): one parser; the view of the panel's VEH goes into `vehicle`
+        if (!panelModeActive()) panelModeEnter();
+        panelModeTick();
+        return;
+    }
+    if (plan.obd) {
         if (obd2p) obd2p->tick();
         return;
     }
-    if (canMode == CAN_MODE_DS2) {
+    if (plan.kline) {
         klineTick();
         return;
     }
@@ -209,6 +219,7 @@ String canStatusString() {
         return s;
     }
     if (!canBus || !canBus->isDriverRunning()) return F("driver off");
+    if (vmode::plan(canMode).panel) return canBus->stateName() + " " + panelModeStatus();
     String s = canBus->stateName();
     if (canMode == CAN_MODE_OBD2) {
         if (!vehicle.lastUpdate) s += " no reply";
@@ -240,3 +251,9 @@ String sniffTableString() {
 }
 
 bool engineRunning() { return vehicleDataFresh() && vehicle.rpm > 300; }
+
+bool vehicleFieldFresh(int field) {
+    return vrules::fieldFresh(vmode::plan(canMode).panel, vehicleFresh, vehicleDataFresh(), field);
+}
+
+bool vehicleTempKnown() { return vrules::tempKnown(vmode::plan(canMode).panel, vehicleFresh); }

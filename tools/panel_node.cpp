@@ -1,4 +1,5 @@
-// L8 panel mode process for the D10 gateway rig (task 027): lib/panel_core with the REAL
+// L8 panel mode process for the D10 gateway rig (task 027; task 036: built on the firmware's
+// src/panel_mode/PanelMode with a line-protocol PanelPort): lib/panel_core with the REAL
 // command layer l8proto (src/protocol, src/settings) built for the host over the same test
 // stubs as test_protocol (test/support). A REQUEST from the bus runs through
 // l8proto::handleV1(..., Transport::Usb, true, ...) — the code HTTP and USB use. Not the
@@ -22,6 +23,8 @@
 #include "../src/settings/settings.cpp"
 #include "../src/protocol/protocol.cpp"
 #include "panel_core.h"
+#include "../src/panel_mode/panel_mode.cpp"
+#include <deque>
 
 SerialStub Serial;
 uint32_t testMillis = 0;
@@ -61,9 +64,6 @@ static uint32_t xorshift(void* ctx) {
   return x;
 }
 
-static uint8_t rxbuf[zmb::kMaxMessage];
-static uint8_t respbuf[zmb::kMaxMessage];
-static zmb::TidEntry tidbuf[256];
 
 struct Node;
 static Node* g = nullptr;
@@ -85,7 +85,44 @@ struct Node {
   uint32_t rng;
   uint8_t bootId[16];
   std::string deviceId, bootHex;
-  std::unique_ptr<PanelCore> core;
+  // the firmware's panel mode over a port that is this process's line protocol
+  struct LinePort : panel_mode::PanelPort {
+    Node* n = nullptr;
+    std::deque<zmb::CanFrame> q;
+    bool ssReady = false;
+    SingleShot ssResult = SingleShot::Sent;
+    bool read(zmb::CanFrame& f) override {
+      if (q.empty()) return false;
+      f = q.front();
+      q.pop_front();
+      return true;
+    }
+    bool send(const zmb::CanFrame& f, bool single) override;
+    bool rxQueueEmpty() override { return q.empty(); }
+    uint32_t overrunCount() override { return 0; }
+    bool busOff() override { return false; }
+    void recover() override {}
+    bool singleShotDone(SingleShot& r) override {
+      if (!ssReady) return false;
+      ssReady = false;
+      r = ssResult;
+      return true;
+    }
+  };
+  struct LineStore : panel_mode::PanelStore {
+    uint32_t id = 0;
+    uint8_t addr = 0;
+    bool load(uint32_t& i, uint8_t& a) override {
+      i = id;
+      a = addr;
+      return true;  // as the rig passes them, zero or not
+    }
+    void save(uint32_t, uint8_t) override {}  // the rig keeps them across REBOOT itself
+  };
+  LinePort port;
+  LineStore store;
+  std::unique_ptr<panel_mode::PanelMode> mode;
+  PanelCore* core = nullptr;  // mode->core()
   bool mute = false, silent = false, pendingSingle = false;
   uint32_t now = 0;
   std::vector<std::string> out;
@@ -108,32 +145,33 @@ struct Node {
       snprintf(buf, sizeof buf, "%02X", b);
       deviceId += buf;
     }
-    Identity id;
-    memcpy(id.mac, mac, 6);
-    id.devType = devType;
-    memcpy(id.bootId, bootId, 16);
-    id.deviceId = deviceId.c_str();
-    id.firmware = "l8 panel_node 0.1";
-    id.storedPanelId = storedPanelId;
-    id.storedAddr = storedAddr;
-    Buffers b{rxbuf, sizeof rxbuf, respbuf, sizeof respbuf, tidbuf, sizeof tidbuf / sizeof tidbuf[0]};
-    CoreIo io;
-    io.ctx = this;
-    io.tx = [](void* c, const zmb::CanFrame& f, bool single) { static_cast<Node*>(c)->emit(f, single); };
-    io.dispatch = [](void* c, const uint8_t* req, size_t len, uint8_t* resp, size_t cap) {
-      return static_cast<Node*>(c)->dispatch(req, len, resp, cap);
-    };
-    io.statusA = [](void*, uint8_t* flags, uint16_t* rev, uint16_t* saved, uint8_t* chOn, uint8_t* chFault) {
-      uint32_t sv = 0;
-      bool hs = settingsSavedRevision(sv);
-      *flags = uint8_t((drive.masterOn ? 1 : 0) | (settingsPreviewActive() ? 2 : 0) | 4);
-      *rev = uint16_t(settingsRevision());
-      *saved = hs ? uint16_t(sv) : 0xFFFF;
-      *chOn = 0;
-      *chFault = 0;
-    };
-    io.log = [](void* c, const char* t) { static_cast<Node*>(c)->out.push_back(std::string("E ") + t); };
-    core.reset(new PanelCore(id, b, io, xorshift, &rng));
+    if (!mode) {
+      port.n = this;
+      panel_mode::Host h;
+      h.ctx = this;
+      h.now = [](void* c) { return static_cast<Node*>(c)->now; };
+      h.dispatch = [](void* c, const uint8_t* req, size_t len, uint8_t* resp, size_t cap) {
+        return static_cast<Node*>(c)->dispatch(req, len, resp, cap);
+      };
+      h.statusA = [](void*, uint8_t* flags, uint16_t* rev, uint16_t* saved, uint8_t* chOn, uint8_t* chFault) {
+        uint32_t sv = 0;
+        bool hs = settingsSavedRevision(sv);
+        *flags = uint8_t((drive.masterOn ? 1 : 0) | (settingsPreviewActive() ? 2 : 0) | 4);
+        *rev = uint16_t(settingsRevision());
+        *saved = hs ? uint16_t(sv) : 0xFFFF;
+        *chOn = 0;
+        *chFault = 0;
+      };
+      h.log = [](void* c, const char* t) { static_cast<Node*>(c)->out.push_back(std::string("E ") + t); };
+      h.rand = xorshift;
+      h.randCtx = &rng;
+      mode.reset(new panel_mode::PanelMode(port, store, h));
+    }
+    store.id = storedPanelId;
+    store.addr = storedAddr;
+    port.q.clear();
+    mode->enter(mac, devType, bootId, deviceId.c_str(), "l8 panel_node 0.1", 3);
+    core = mode->core();
   }
 
   void emit(const zmb::CanFrame& f, bool single) {
@@ -243,6 +281,11 @@ static void installHooks() {
   l8proto::setHooks(h);
 }
 
+bool Node::LinePort::send(const zmb::CanFrame& f, bool single) {
+  n->emit(f, single);
+  return true;  // on the rig's bus (or dropped by SILENT, which the core never learns)
+}
+
 int main(int argc, char** argv) {
   if (argc < 3) return 2;
   auto m = hexBytes(argv[1]);
@@ -266,19 +309,21 @@ int main(int argc, char** argv) {
       n.now = uint32_t(strtoul(strtok_r(nullptr, " \r\n", &rest), nullptr, 10));
       testMillis = n.now;
       settingsTick();  // as main.cpp's loop: preview lease expiry, delayed flash write
-      n.core->tick(n.now);
+      n.mode->tick();
     } else if (!strcmp(cmd, "F")) {
       zmb::CanFrame f;
       f.id = uint32_t(strtoul(strtok_r(nullptr, " \r\n", &rest), nullptr, 16));
       auto d = hexBytes(strtok_r(nullptr, " \r\n", &rest));
       memcpy(f.data, d.data(), d.size() < 8 ? d.size() : 8);
       // the rig delivers frames as they come: the queue was empty just before
-      panel_rx::QueueStamp q;
-      panel_rx::Stamp st = q.read(q.poll(panel_rx::Snapshot::at(n.now, true, false)), n.now, false);
-      n.core->onFrame(f, st, n.now);
+      n.mode->rx();  // the queue is empty just before the frame: the anchor is now (§14.3)
+      n.port.q.push_back(f);
+      n.mode->rx();
     } else if (!strcmp(cmd, "R")) {
       if (n.pendingSingle) {
-        n.core->singleShotResult(atoi(strtok_r(nullptr, " \r\n", &rest)) ? SingleShot::Sent : SingleShot::Lost, n.now);
+        n.port.ssResult = atoi(strtok_r(nullptr, " \r\n", &rest)) ? SingleShot::Sent : SingleShot::Lost;
+        n.port.ssReady = true;
+        n.mode->service();
         n.pendingSingle = false;
       }
     } else if (!strcmp(cmd, "REBOOT")) {

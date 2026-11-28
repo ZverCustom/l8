@@ -2,6 +2,7 @@
 #include "obd2/obd2.h"
 #include "settings/settings.h"
 #include "vehicle/vehicle.h"
+#include "vehicle/vehicle_rules.h"
 #include "imu/imu.h"
 #include "power/power.h"
 #include "board/board.h"
@@ -222,25 +223,20 @@ CRGB getColorForSection(int currentLED, int numLeds) {
 
 // Value of a scale source as fraction of full scale, signed for G / yaw
 static float scaleFraction(int source) {
-    if(source<=2 && !vehicleDataFresh()) return 0;
     if((source==3 || source==4) && !imu.ok) return 0;
     switch (source) {
-        case 1:  return drive.maxSpeed > 0 ? (float)vehicle.speed / drive.maxSpeed : 0;
-        case 2:  return vehicle.throttle / 100.0f;
+        case 1: case 2:
+            return vrules::vehicleScale(source, vehicleFieldFresh(source), vehicle.rpm, vehicle.speed, vehicle.throttle, drive.maxSpeed, can_setting.minRPM, can_setting.maxRPM);
         case 3:  return drive.maxLateralG > 0 ? imuLateralG() / drive.maxLateralG : 0;
         case 4:  return drive.maxYawRate > 0 ? imuYawRate() / drive.maxYawRate : 0;
         case 5: case 6: case 7: return powerSnapshot().inputValue[source-5];
-        default: {
-            int span = can_setting.maxRPM - can_setting.minRPM;
-            if (span <= 0) return 0;
-            return max(0.f,(float)((int)vehicle.rpm - can_setting.minRPM) / span);
-        }
+        default:
+            return vrules::vehicleScale(0, vehicleFieldFresh(0), vehicle.rpm, vehicle.speed, vehicle.throttle, drive.maxSpeed, can_setting.minRPM, can_setting.maxRPM);
     }
 }
 
 static bool shiftLightActive() {
-    int threshold = drive.shiftRPM > 0 ? drive.shiftRPM : can_setting.maxRPM;
-    return vehicleDataFresh() && (int)vehicle.rpm >= threshold;
+    return vrules::shiftLight(vehicleFieldFresh(0), vehicle.rpm, drive.shiftRPM, can_setting.maxRPM);
 }
 
 // Bar graph driven by the selected source

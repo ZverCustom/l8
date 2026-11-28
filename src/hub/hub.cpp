@@ -90,7 +90,8 @@ static void statusFill(JsonObject d) {
     wifi["droppedEvents"]=netDroppedEvents();
     d["ip"]=WiFi.status()==WL_CONNECTED?WiFi.localIP().toString():WiFi.softAPIP().toString();
     d["canStatus"]=canStatusString(); d["canBitrate"]=canBitrateString(); d["dataFresh"]=vehicleDataFresh();
-    d["rpm"]=vehicle.rpm; d["speed"]=vehicle.speed; d["temp"]=vehicle.temp; d["throttle"]=vehicle.throttle;
+    d["rpm"]=vehicle.rpm; d["speed"]=vehicle.speed; d["throttle"]=vehicle.throttle;
+    if(vehicleTempKnown()) d["temp"]=vehicle.temp; else d["temp"]=nullptr; // panel mode: a stale temperature is not 0 °C
     auto channels=d.createNestedArray("channels");
     for(int i=0;i<8;++i) { auto c=channels.createNestedObject(); c["brightnessScale"]=p.channels[i].brightnessScale; c["retries"]=p.channels[i].retries; c["retryPending"]=p.channels[i].retryPending; c["retryInMs"]=p.channels[i].retryInMs; c["on"]=p.channels[i].on; c["amps"]=p.channels[i].amps; c["fault"]=powerFaultName(p.channels[i].fault); c["reason"]=powerReasonName(p.channels[i].reason); c["isVolts"]=p.channels[i].isVolts; c["data"]=bool(boardDataMask()&v3::channelMask(i)); c["legacyIndex"]=v3::hardwareChannel(i); auto pins=c.createNestedArray("pins"); pins.add(v3::CHANNELS[i].power); pins.add(v3::CHANNELS[i].data); pins.add(v3::CHANNELS[i].ground); }
     auto inputs=d.createNestedArray("inputs"); for(int i=0;i<3;++i) { auto x=inputs.createNestedObject(); x["mv"]=p.inputMv[i]; x["volts"]=p.inputMv[i]*.0053f; x["value"]=p.inputValue[i]; }

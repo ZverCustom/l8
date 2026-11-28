@@ -3,6 +3,7 @@
 #include "pins/pins.h"
 #include "settings/settings.h"
 #include "vehicle/vehicle.h"
+#include "vehicle/vehicle_rules.h"
 #include <v3_safety.h>
 #include <channel_reason.h>
 static_assert(uint8_t(v3::Reason::Io)==1,"ChannelPower::reason defaults to io");
@@ -32,7 +33,7 @@ const char* powerFaultName(uint8_t v) { return v==1 ? "overcurrent" : v==2 ? "sw
 void powerTick() {
     Request next;
     next.master=drive.masterOn; next.autoRetry=savedData.autoRetry; next.totalMaxAmps=drive.powerLimitMa/1000.f;
-    bool parked=savedData.cutPowerEngineOff && drive.engineOff==2 && !engineRunning();
+    bool parked=vrules::parkedCut(savedData.cutPowerEngineOff, drive.engineOff, engineRunning());
     next.masterRequested=drive.masterOn; next.engineCut=parked;
     if(parked) next.master=false;
     next.allowWithoutIgn=savedData.allowWithoutIgn; next.sensor=savedData.sensor5v;

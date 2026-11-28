@@ -229,7 +229,10 @@ TxOutcome Sender::finish(TxResult r, uint8_t code, uint8_t abortReason) {
   state_ = TxState::Idle;
   haveDeadline_ = false;
   pendingAbort_ = abortReason;
-  return TxOutcome{r, code};
+  TxOutcome o;  // C++11 (the firmware's gnu++11): no aggregate init with member defaults
+  o.result = r;
+  o.code = code;
+  return o;
 }
 
 TxOutcome Sender::onFrame(const CanFrame& f, uint32_t now) {
