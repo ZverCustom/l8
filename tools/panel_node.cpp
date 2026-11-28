@@ -206,7 +206,7 @@ static void installHooks() {
     l["previewLeaseMs"] = L8_PREVIEW_LEASE_MS;
     l["previewIntervalMs"] = 100;
     l["statusIntervalMs"] = 500;
-    l["maxSseClients"] = 4;
+    l["maxSseClients"] = 3;  // hub.cpp: streams[3]
   };
   h.status = [](JsonObject d) {
     d["configRevision"] = settingsRevision();
