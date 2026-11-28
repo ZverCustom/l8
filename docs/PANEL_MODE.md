@@ -62,6 +62,27 @@ Build and host tests only: **no board is flashed.**
 | L4 | bus-off → listen; pauses 1, 2, 4, 8, 16 s observed (no switch earlier even with PANEL_HB); 6th → held 60 s; 60 s clean resets `k` |
 | L5 | mutant «normal right on entry» caught; rigs and previous suites unchanged |
 
+## R93 / R94 (review U3-030, task 037) — A5 revision 2
+
+- **Three distinct periods:** a PANEL_HB counts only if ≥ 50 ms after the last counted one
+  (`kHbMinMs`); a retransmission inside 50 ms neither counts nor resets the count.
+- **Driver ownership (R94):** in panel mode only `PanelMode` switches TWAI. A bitrate setting
+  change does not restart the driver (`vmode::bitrateChangeRestarts(4) == false`); the saved
+  value applies when the mode is left.
+- **Host bus model with acknowledgements** (`test_panel_mode`): a frame is acknowledged only
+  if another node is in normal mode; without one the sender (the panel side) goes
+  error-active → error-passive (TEC, 16 failed attempts), listeners get it only while the
+  sender is error-passive, with retransmission duplicates.
+
+| ID | Expected |
+|---|---|
+| B1 | panel + two L8, all listening, no other node: both reach `ready`; unacknowledged panel frames and time to `ready` reported; the panel never goes bus-off |
+| B2 | two L8 without a panel, 60 s: neither sends a frame |
+| B3 | a foreign acknowledging node, no panel: the L8 stay listening |
+| B4 | duplicates within 50 ms do not count; three periods do |
+| B5 | R94: bitrate setting change in panel mode does not restart the driver; state and `canStatus` stay consistent |
+| X | mutants: listening node acknowledges; retransmissions count as periods; bitrate change restarts the driver past `PanelMode` |
+
 ## Vehicle data in panel mode
 
 `PanelMode` writes `PanelCore::panelVehicle(now)` into the existing `vehicle` (rpm,
