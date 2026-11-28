@@ -24,7 +24,7 @@ inline Plan plan(int mode) {
     case kDs2:
       return {true, -1, false, false, true, false, false};
     case kPanel:
-      return {false, kBr1M, false, false, false, false, true};
+      return {true, kBr1M, false, false, false, false, true};  // listen first (A5, R92)
     default:  // BMW, sniffer and any other value: listen-only, read frames
       return {true, -1, true, false, false, true, false};
   }

@@ -12,6 +12,8 @@
 #include "system/system.h"
 #include "vehicle/vehicle.h"
 
+extern CANBus canBus;  // main.cpp
+
 namespace {
 
 class NvsStore : public panel_mode::PanelStore {
@@ -74,6 +76,7 @@ void logLine(void*, const char* t) { sysLog(String("panel: ") + t); }
 }  // namespace
 
 void panelModeEnter() {
+  port.bus = &canBus;
   if (!mode) {
     panel_mode::Host h;
     h.now = nowMs;
@@ -115,7 +118,24 @@ void panelModeTick() {
 
 String panelModeStatus() {
   if (!panelModeActive()) return F("panel off");
-  String s = String("panel ") + mode->phase();
+  if (mode->listening()) {
+    // A5: what the module waits for
+    uint32_t retry = mode->retryInMs(millis());
+    switch (mode->listenReason()) {
+      case panel_mode::Listen::BusOff:
+      case panel_mode::Listen::Limit:
+        if (retry) {
+          return String("panel listen: ") + (mode->listenReason() == panel_mode::Listen::Limit ? String("bus-off limit") : String("bus-off ") + mode->busOffRun()) +
+                 ", retry in " + String((retry + 999) / 1000) + " s";
+        }
+        return String("panel listen: bus-off ") + mode->busOffRun() + ", waiting PANEL_HB " + mode->hbCount() + "/3";
+      case panel_mode::Listen::NoHb:
+        return String("panel listen: no PANEL_HB, waiting ") + mode->hbCount() + "/3";
+      default:
+        return String("panel listen: waiting PANEL_HB ") + mode->hbCount() + "/3";
+    }
+  }
+  String s = String("panel active ") + mode->phase();
   if (mode->core()->addr()) {
     char b[8];
     snprintf(b, sizeof b, " 0x%02X", mode->core()->addr());
@@ -123,7 +143,6 @@ String panelModeStatus() {
   }
   uint8_t f = vehicleFresh;
   s += !vehicle.lastUpdate ? " veh none" : (f & panel_core::kFreshRpm) ? " veh fresh" : " veh stale";
-  if (mode->busOffNow()) s += " bus-off";
   s += " busoff=" + String(mode->counters().busOffs);
   return s;
 }

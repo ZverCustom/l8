@@ -24,8 +24,14 @@ struct Host {
 };
 
 struct Counters {
-  uint32_t frames = 0, sent = 0, sendFailed = 0, busOffs = 0, recoveries = 0, overrunVoids = 0;
+  uint32_t frames = 0, sent = 0, sendFailed = 0, txBlocked = 0, busOffs = 0, activations = 0, overrunVoids = 0;
 };
+
+// v6 addendum A5 (R92): listen first, normal after 3 PANEL_HB, back on loss or bus-off.
+constexpr uint8_t kHbNeeded = 3;
+constexpr uint32_t kHbGapMs = 300, kHbLossMs = 1000, kHoldMs = 60000, kCleanMs = 60000;
+constexpr uint8_t kBusOffLimit = 5;  // pauses 1, 2, 4, 8, 16 s; then held kHoldMs
+enum class Listen : uint8_t { Entry, NoHb, BusOff, Limit };
 
 class PanelMode {
  public:
@@ -49,8 +55,13 @@ class PanelMode {
   panel_core::PanelCore* core() { return core_; }
   const panel_core::PanelCore* core() const { return core_; }
   const Counters& counters() const { return c_; }
-  bool busOffNow() const { return busOff_; }
-  // "unassigned" | "hello" | "ready" | "off"
+  bool listening() const { return listen_; }
+  Listen listenReason() const { return reason_; }
+  uint8_t hbCount() const { return hbCount_; }
+  uint8_t busOffRun() const { return busOffRun_; }
+  // ms until PANEL_HB counting resumes (0: counting now)
+  uint32_t retryInMs(uint32_t now) const;
+  // "off" | "listen" | "unassigned" | "hello" | "ready"
   const char* phase() const;
 
  private:
@@ -62,7 +73,13 @@ class PanelMode {
   alignas(panel_core::PanelCore) uint8_t coreMem_[sizeof(panel_core::PanelCore)];
   panel_rx::QueueStamp stamp_;
   uint32_t overrunSeen_ = 0;
-  bool pendingSingle_ = false, busOff_ = false;
+  void noteHb(const zmb::CanFrame& f, uint32_t t);
+  void goListen(uint32_t now, Listen why);
+  bool pendingSingle_ = false;
+  bool listen_ = true;
+  Listen reason_ = Listen::Entry;
+  uint8_t hbCount_ = 0, busOffRun_ = 0;
+  uint32_t hbId_ = 0, hbGen_ = 0, hbLast_ = 0, lastHb_ = 0, activeSince_ = 0, holdUntil_ = 0;
   bool forced_ = false;  // a single-shot frame that never reached the bus
   panel_core::SingleShot forcedOutcome_ = panel_core::SingleShot::Lost;
   uint32_t savedId_ = 0;

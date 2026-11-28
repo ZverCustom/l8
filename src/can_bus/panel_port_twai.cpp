@@ -49,15 +49,15 @@ bool TwaiPanelPort::busOff() {
   return twai_get_status_info(&st) == ESP_OK && st.state == TWAI_STATE_BUS_OFF;
 }
 
-void TwaiPanelPort::recover() {
-  twai_initiate_recovery();  // the driver goes to STOPPED when recovered; started again below
+void TwaiPanelPort::setListenOnly(bool listenOnly) {
+  // reinstall at 1 Mbit/s in the requested mode; uninstall is allowed in bus-off too
+  if (bus) bus->restart(listenOnly, BR_1M);
   singleInFlight_ = false;
 }
 
 bool TwaiPanelPort::singleShotDone(panel_core::SingleShot& r) {
   twai_status_info_t st;
   if (twai_get_status_info(&st) != ESP_OK) return false;
-  if (st.state == TWAI_STATE_STOPPED) twai_start();  // after a recovery
   if (!singleInFlight_) return false;
   if (st.tx_failed_count != txFailedSeen_) {
     singleInFlight_ = false;

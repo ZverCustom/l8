@@ -52,7 +52,9 @@ struct ModelPort : panel_mode::PanelPort {
   std::vector<std::pair<CanFrame, bool>> sent;
   uint32_t overruns = 0;
   bool off = false, failSends = false;
-  int recovers = 0;
+  bool listenOnly = false;
+  int toListen = 0, toNormal = 0, sentCount = 0;
+  bool everNormal = false;
   bool single = false;
   bool singleResultReady = false;
   SingleShot singleResult = SingleShot::Sent;
@@ -63,7 +65,9 @@ struct ModelPort : panel_mode::PanelPort {
     return true;
   }
   bool send(const CanFrame& f, bool s) override {
+    TEST_ASSERT_FALSE_MESSAGE(listenOnly, "a frame offered to the driver in listen-only");
     if (off || failSends) return false;
+    sentCount++;
     sent.push_back({f, s});
     if (s) single = true;
     return true;
@@ -71,7 +75,12 @@ struct ModelPort : panel_mode::PanelPort {
   bool rxQueueEmpty() override { return rxq.empty(); }
   uint32_t overrunCount() override { return overruns; }
   bool busOff() override { return off; }
-  void recover() override { recovers++; }
+  void setListenOnly(bool l) override {
+    listenOnly = l;
+    (l ? toListen : toNormal)++;
+    everNormal |= !l;
+    if (l) off = false;  // the driver restarts: out of bus-off
+  }
   bool singleShotDone(SingleShot& r) override {
     if (!single || !singleResultReady) return false;
     single = false;
@@ -125,6 +134,7 @@ struct World {
   std::vector<CanFrame> statusA;
   uint16_t dtid = 100;
   uint32_t bootTag = 0;
+  bool hbOn = true;  // the panel's PANEL_HB every 100 ms
 
   World() {
     settingsBegin();
@@ -198,6 +208,7 @@ struct World {
   // One millisecond: the mode's loop pass, what it sent reaches the D10, the D10 answers.
   void step() {
     now++;
+    if (hbOn && now % 100 == 0) feed(panelHb(panelGen));
     mode->tick();
     auto out = port.sent;
     port.sent.clear();
@@ -256,8 +267,8 @@ struct World {
   void request(const char* json) { d10Send(MsgType::Request, reinterpret_cast<const uint8_t*>(json), strlen(json)); }
 
   void bringUp(uint8_t a = 5) {
-    feed(panelHb(panelGen));
-    run(300);
+    run(400);  // 3 PANEL_HB: normal mode (A5)
+    TEST_ASSERT_FALSE(mode->listening());
     addr = a;
     drx = Receiver(a, drxbuf, sizeof drxbuf);
     feed(assign(a, panelGen));
@@ -311,7 +322,7 @@ static void test_d1_old_modes_plan_unchanged_panel_off() {
   }
   vmode::Plan p = vmode::plan(4);
   TEST_ASSERT_TRUE(p.panel);
-  TEST_ASSERT_FALSE(p.listenOnly);  // §15: normal mode
+  TEST_ASSERT_TRUE(p.listenOnly);  // A5 (R92): the mode starts listen-only
   TEST_ASSERT_FALSE(p.autoBitrate);
   TEST_ASSERT_FALSE(p.obd);
   TEST_ASSERT_FALSE(p.readFrames);
@@ -333,7 +344,7 @@ static void test_d2_discovery_address_and_stored_address() {
   TEST_ASSERT_EQUAL_STRING("off", w.mode->phase());
   w.boot(0xB0);
   TEST_ASSERT_EQUAL(5, w.mode->core()->discovery().storedAddr());
-  TEST_ASSERT_EQUAL_STRING("unassigned", w.mode->phase());
+  TEST_ASSERT_EQUAL_STRING("listen", w.mode->phase());  // A5: every entry starts listening
 }
 
 static void test_d2_request_through_the_real_dispatcher() {
@@ -395,39 +406,153 @@ static void test_d2_veh_per_field_freshness_and_status_a_rpm_fresh() {
   TEST_ASSERT_TRUE_MESSAGE(sawFresh, "STATUS_A rpmFresh from the view");
 }
 
-static void test_d2_bus_off_and_recovery() {
+// ---- R92 / A5: listen first ---------------------------------------------------------------------
+
+static void test_l1_no_panel_hb_60_s_nothing_sent_never_normal() {
   World w;
+  w.hbOn = false;
+  uint32_t r = 99, alt = 0;
+  auto rnd = [&](uint32_t n) { return xs(&r) % n; };
+  for (int ms = 0; ms < 60000; ms++) {
+    if (ms % 10 == 0) {
+      CanFrame f;
+      switch (rnd(8)) {
+        case 0:  // standard IDs (a car bus)
+          f.extended = false;
+          f.id = 0x316 + rnd(0x400);
+          break;
+        case 1:  // other extended IDs
+          f.id = rnd(0x1FFFFFFF);
+          break;
+        case 2: {  // PANEL_HB of the wrong length
+          f = w.panelHb(w.panelGen);
+          f.dlc = uint8_t(rnd(8));
+          break;
+        }
+        case 3: {  // PANEL_HB with panelId 0
+          f = w.panelHb(w.panelGen);
+          memset(f.data, 0, 4);
+          break;
+        }
+        case 4: {  // other panels: never the real one, never twice the same in a row
+          f = w.panelHb(w.panelGen + 1 + (alt % 2));
+          f.data[3] ^= uint8_t(1 + (alt++ % 3));
+          break;
+        }
+        case 5:  // a remote frame with the PANEL_HB ID
+          f = w.panelHb(w.panelGen);
+          f.rtr = true;
+          break;
+        default:
+          for (auto& b : f.data) b = uint8_t(rnd(256));
+          f.id = rnd(0x1FFFFFFF);
+          f.dlc = uint8_t(rnd(9));
+      }
+      w.feed(f);
+    }
+    if (ms % 1000 == 500) {  // two correct PANEL_HB, then nothing for 900 ms
+      w.feed(w.panelHb(w.panelGen));
+    }
+    if (ms % 1000 == 600) w.feed(w.panelHb(w.panelGen));
+    w.now++;
+    w.mode->tick();
+  }
+  TEST_ASSERT_EQUAL_MESSAGE(0, w.port.sentCount, "not one frame in 60 s without a panel");
+  TEST_ASSERT_FALSE_MESSAGE(w.port.everNormal, "never left listen-only");
+  TEST_ASSERT_TRUE(w.mode->listening());
+  TEST_ASSERT_EQUAL_STRING("listen", w.mode->phase());
+  TEST_ASSERT_TRUE(w.mode->counters().frames > 5000);
+}
+
+static void test_l2_three_panel_hb_then_normal_and_discovery() {
+  World w;
+  w.hbOn = false;
+  for (int k = 0; k < 2; k++) {
+    w.feed(w.panelHb(w.panelGen));
+    w.run(100);
+  }
+  TEST_ASSERT_TRUE(w.mode->listening());
+  TEST_ASSERT_EQUAL(2, w.mode->hbCount());
+  TEST_ASSERT_EQUAL(0, w.port.sentCount);
   w.feed(w.panelHb(w.panelGen));
-  // an ANNOUNCE is in flight (single-shot) when the bus goes off
-  for (int i = 0; i < 400 && !w.port.single; i++) {
+  w.run(1);
+  TEST_ASSERT_FALSE(w.mode->listening());
+  TEST_ASSERT_FALSE(w.port.listenOnly);
+  w.hbOn = true;
+  w.bringUp(5);  // the previous discovery path
+  TEST_ASSERT_EQUAL_STRING("ready", w.mode->phase());
+}
+
+static void test_l3_panel_hb_lost_back_to_listen() {
+  World w;
+  w.bringUp();
+  w.hbOn = false;
+  w.run(1000);
+  TEST_ASSERT_FALSE(w.mode->listening());
+  w.run(2);
+  TEST_ASSERT_TRUE(w.mode->listening());
+  TEST_ASSERT_TRUE(w.mode->listenReason() == panel_mode::Listen::NoHb);
+  int sent = w.port.sentCount;
+  w.run(5000);
+  TEST_ASSERT_EQUAL_MESSAGE(sent, w.port.sentCount, "nothing sent after the panel was lost");
+  w.hbOn = true;
+  w.run(400);
+  TEST_ASSERT_FALSE_MESSAGE(w.mode->listening(), "the panel is back: normal again");
+}
+
+// one bus-off in normal mode; returns ms from the bus-off to normal again (PANEL_HB flowing)
+static uint32_t busOffAndBack(World& w) {
+  TEST_ASSERT_FALSE(w.mode->listening());
+  w.port.off = true;
+  w.run(1);
+  TEST_ASSERT_TRUE(w.mode->listening());
+  uint32_t t0 = w.now;
+  // (ModelPort::send fails the test if a frame is offered while listen-only)
+  while (w.mode->listening()) {
+    w.run(1);
+    TEST_ASSERT_TRUE_MESSAGE(w.now - t0 < 70000, "never back");
+  }
+  return w.now - t0;
+}
+
+static void test_l4_bus_off_listen_backoff_and_limit() {
+  World w;
+  w.bringUp();
+  const uint32_t pause[5] = {1000, 2000, 4000, 8000, 16000};
+  for (int k = 0; k < 5; k++) {
+    uint32_t back = busOffAndBack(w);
+    // not before the pause (PANEL_HB keep coming), then 3 PANEL_HB (≤ 300 ms more)
+    TEST_ASSERT_TRUE_MESSAGE(back >= pause[k], "switched back before the pause");
+    TEST_ASSERT_TRUE_MESSAGE(back <= pause[k] + 400, "too late after the pause");
+    TEST_ASSERT_EQUAL(k + 1, w.mode->busOffRun());
+  }
+  uint32_t held = busOffAndBack(w);  // the 6th: held
+  TEST_ASSERT_TRUE(held >= panel_mode::kHoldMs);
+  TEST_ASSERT_TRUE(held <= panel_mode::kHoldMs + 400);
+  TEST_ASSERT_EQUAL(6, w.mode->busOffRun());
+  TEST_ASSERT_EQUAL(6, int(w.mode->counters().busOffs));
+  // a minute of normal mode without bus-off: the count starts over
+  w.run(int(panel_mode::kCleanMs) + 10);
+  TEST_ASSERT_EQUAL(0, w.mode->busOffRun());
+  uint32_t again = busOffAndBack(w);
+  TEST_ASSERT_TRUE(again >= 1000 && again <= 1400);
+}
+
+static void test_l4_single_shot_in_flight_at_bus_off_is_bus_error() {
+  World w;
+  w.hbOn = false;
+  // 3 PANEL_HB by hand (no automatic single-shot results), then the first ANNOUNCE
+  for (int i = 0; i < 700 && !w.port.single; i++) {
+    if (i % 100 == 0) w.feed(w.panelHb(w.panelGen));
     w.now++;
     w.mode->tick();
   }
   TEST_ASSERT_TRUE(w.port.single);
-  w.port.sent.clear();
   w.port.off = true;
   w.now++;
   w.mode->tick();
+  TEST_ASSERT_TRUE(w.mode->listening());
   TEST_ASSERT_EQUAL(1, int(w.mode->counters().busOffs));
-  TEST_ASSERT_EQUAL(1, w.port.recovers);
-  TEST_ASSERT_TRUE(w.mode->busOffNow());
-  for (int i = 0; i < 500; i++) {
-    w.now++;
-    w.mode->tick();
-  }
-  TEST_ASSERT_EQUAL_MESSAGE(0, int(w.port.sent.size()), "nothing sent while bus-off");
-  TEST_ASSERT_EQUAL(1, w.port.recovers);
-  w.port.off = false;
-  w.port.single = false;
-  w.run(600);
-  TEST_ASSERT_EQUAL(1, int(w.mode->counters().recoveries));
-  TEST_ASSERT_FALSE(w.mode->busOffNow());
-  // and discovery goes on to ready
-  w.port.sent.clear();
-  w.d10Got.clear();
-  w.d10Hdr.clear();
-  w.bringUp(6);
-  TEST_ASSERT_EQUAL(6, w.mode->core()->addr());
 }
 
 static void test_d2_enter_exit_and_overrun_voids_anchor() {
@@ -524,7 +649,11 @@ int main() {
   RUN_TEST(test_d2_discovery_address_and_stored_address);
   RUN_TEST(test_d2_request_through_the_real_dispatcher);
   RUN_TEST(test_d2_veh_per_field_freshness_and_status_a_rpm_fresh);
-  RUN_TEST(test_d2_bus_off_and_recovery);
+  RUN_TEST(test_l1_no_panel_hb_60_s_nothing_sent_never_normal);
+  RUN_TEST(test_l2_three_panel_hb_then_normal_and_discovery);
+  RUN_TEST(test_l3_panel_hb_lost_back_to_listen);
+  RUN_TEST(test_l4_bus_off_listen_backoff_and_limit);
+  RUN_TEST(test_l4_single_shot_in_flight_at_bus_off_is_bus_error);
   RUN_TEST(test_d2_enter_exit_and_overrun_voids_anchor);
   RUN_TEST(test_d3_readers_fresh_stale_none);
   RUN_TEST(test_d3_other_modes_readers_unchanged);

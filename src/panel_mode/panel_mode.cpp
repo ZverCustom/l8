@@ -14,12 +14,15 @@ PanelMode::~PanelMode() { exit(); }
 void PanelMode::txThunk(void* c, const zmb::CanFrame& f, bool single) {
   PanelMode& m = *static_cast<PanelMode*>(c);
   if (single) m.pendingSingle_ = true;
-  if (m.busOff_ || !m.port_.send(f, single)) {
-    // not on the bus: a single-shot frame is answered in service(), never from inside the core
-    m.c_.sendFailed++;
+  // listen (A5): nothing is transmitted; a single-shot frame is answered in service(), never
+  // from inside the core
+  bool blocked = m.listen_;
+  if (blocked || !m.port_.send(f, single)) {
+    if (blocked) m.c_.txBlocked++;
+    else m.c_.sendFailed++;
     if (single) {
       m.forced_ = true;
-      m.forcedOutcome_ = m.busOff_ ? SingleShot::BusError : SingleShot::Lost;
+      m.forcedOutcome_ = SingleShot::Lost;
     }
     return;
   }
@@ -64,7 +67,13 @@ void PanelMode::enter(const uint8_t mac[6], uint8_t devType, const uint8_t bootI
   stamp_ = panel_rx::QueueStamp();
   overrunSeen_ = port_.overrunCount();
   pendingSingle_ = forced_ = false;
-  busOff_ = port_.busOff();
+  // A5: every entry starts listen-only; bus-off history starts over
+  port_.setListenOnly(true);
+  listen_ = true;
+  reason_ = Listen::Entry;
+  hbCount_ = 0;
+  busOffRun_ = 0;
+  holdUntil_ = host_.now(host_.ctx);
   core_ = new (coreMem_) panel_core::PanelCore(id, b, io, host_.rand, host_.randCtx);
 }
 
@@ -94,25 +103,68 @@ void PanelMode::rx(int budget) {
     if (grew2) c_.overrunVoids++;
     panel_rx::Stamp st = stamp_.read(p, tRead, grew2);
     c_.frames++;
+    noteHb(f, tRead);
     core_->onFrame(f, st, tRead);
   }
 }
 
+static bool before(uint32_t a, uint32_t b) { return int32_t(a - b) < 0; }
+
+void PanelMode::noteHb(const zmb::CanFrame& f, uint32_t t) {
+  if (!f.extended || f.rtr || f.dlc != 8 || f.id != panel_rx::kIdPanelHb) return;
+  uint32_t id = uint32_t(f.data[0]) << 24 | uint32_t(f.data[1]) << 16 | uint32_t(f.data[2]) << 8 | f.data[3];
+  uint32_t gen = uint32_t(f.data[4]) << 24 | uint32_t(f.data[5]) << 16 | uint32_t(f.data[6]) << 8 | f.data[7];
+  if (id == 0) return;
+  if (!listen_) {
+    lastHb_ = t;
+    return;
+  }
+  if (before(t, holdUntil_)) return;  // pause after bus-off: not counted
+  if (hbCount_ && id == hbId_ && gen == hbGen_ && t - hbLast_ <= kHbGapMs) {
+    hbCount_++;
+  } else {
+    hbCount_ = 1;
+    hbId_ = id;
+    hbGen_ = gen;
+  }
+  hbLast_ = t;
+  if (hbCount_ < kHbNeeded) return;
+  // a D10 panel is on this bus at this bitrate: normal mode (A5)
+  port_.setListenOnly(false);
+  listen_ = false;
+  hbCount_ = 0;
+  activeSince_ = lastHb_ = t;
+  c_.activations++;
+}
+
+void PanelMode::goListen(uint32_t now, Listen why) {
+  port_.setListenOnly(true);
+  listen_ = true;
+  reason_ = why;
+  hbCount_ = 0;
+  (void)now;
+}
+
+uint32_t PanelMode::retryInMs(uint32_t now) const { return before(now, holdUntil_) ? holdUntil_ - now : 0; }
+
 void PanelMode::service() {
   if (!core_) return;
   uint32_t now = host_.now(host_.ctx);
-  bool off = port_.busOff();
-  if (off && !busOff_) {
+  if (!listen_ && port_.busOff()) {
     c_.busOffs++;
     if (pendingSingle_) {
       pendingSingle_ = forced_ = false;
       core_->singleShotResult(SingleShot::BusError, now);
     }
-    port_.recover();
-  } else if (!off && busOff_) {
-    c_.recoveries++;
+    busOffRun_++;
+    bool limit = busOffRun_ > kBusOffLimit;
+    holdUntil_ = now + (limit ? kHoldMs : (1000u << (busOffRun_ - 1)));
+    goListen(now, limit ? Listen::Limit : Listen::BusOff);
+  } else if (!listen_ && now - lastHb_ > kHbLossMs) {
+    goListen(now, Listen::NoHb);
+  } else if (!listen_ && busOffRun_ && now - activeSince_ >= kCleanMs) {
+    busOffRun_ = 0;  // a minute of normal mode without bus-off
   }
-  busOff_ = off;
   if (!pendingSingle_) return;
   SingleShot r;
   if (forced_) {
@@ -146,6 +198,7 @@ panel_core::VehicleView PanelMode::view(uint32_t now) const {
 
 const char* PanelMode::phase() const {
   if (!core_) return "off";
+  if (listen_) return "listen";
   if (core_->ready()) return "ready";
   return core_->addr() ? "hello" : "unassigned";
 }

@@ -20,7 +20,9 @@ class PanelPort {
   // RX overrun / missed counters added up (§14.3: growth voids the anchor).
   virtual uint32_t overrunCount() = 0;
   virtual bool busOff() = 0;
-  virtual void recover() = 0;
+  // Listen-only (receive, never transmit — no ACK, no error flags) or normal; the driver
+  // restarts in that mode at the panel bitrate, which also leaves bus-off (A5, R92).
+  virtual void setListenOnly(bool listenOnly) = 0;
   // The outcome of the last single-shot frame, once known.
   virtual bool singleShotDone(panel_core::SingleShot& r) = 0;
 };

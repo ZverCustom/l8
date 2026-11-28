@@ -2,6 +2,7 @@
 // the hardware. CANBus keeps owning install/start/restart.
 #pragma once
 
+#include "can_bus.h"
 #include "panel_mode/panel_port.h"
 
 class TwaiPanelPort : public panel_mode::PanelPort {
@@ -11,7 +12,8 @@ class TwaiPanelPort : public panel_mode::PanelPort {
   bool rxQueueEmpty() override;
   uint32_t overrunCount() override;
   bool busOff() override;
-  void recover() override;
+  void setListenOnly(bool listenOnly) override;
+  CANBus* bus = nullptr;  // the owner of the driver (main.cpp)
   bool singleShotDone(panel_core::SingleShot& r) override;
 
  private:

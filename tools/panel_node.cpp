@@ -101,7 +101,8 @@ struct Node {
     bool rxQueueEmpty() override { return q.empty(); }
     uint32_t overrunCount() override { return 0; }
     bool busOff() override { return false; }
-    void recover() override {}
+    void setListenOnly(bool l) override { listenOnly = l; }  // A5: the core sends only when normal
+    bool listenOnly = true;
     bool singleShotDone(SingleShot& r) override {
       if (!ssReady) return false;
       ssReady = false;
