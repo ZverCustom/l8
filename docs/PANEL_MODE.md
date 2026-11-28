@@ -35,6 +35,33 @@ Build and host tests only: **no board is flashed.**
   calls `recover()` (TWAI recovery, restart when back) and counts it; frames are not
   sent while the bus is off. The core's own timers end what was in flight (§16).
 
+## R92 (review U3-029): listen first — v6 addendum A5 (vault)
+
+- Panel mode **starts listen-only** at 1 Mbit/s (`vmode::plan(4).listenOnly = true`): a
+  module that got the mode by mistake on a 500 kbit/s car bus sends nothing, not even error
+  flags. `PanelMode` switches the port to normal only after **3 valid PANEL_HB in a row**
+  (extended ID PANEL_HB, DLC 8, `panelId ≠ 0`, same `panelId`/`panelGen`, gaps ≤ 300 ms).
+  Standard IDs, other IDs, other lengths and garbage do not count.
+- Back to listen: no PANEL_HB for 1 000 ms, or bus-off. After bus-off `k` (in a row) HB
+  counting resumes only after 1, 2, 4, 8, 16 s; after the 6th the module is held: 60 s, then
+  3 new PANEL_HB. `k` resets after 60 s of normal mode without bus-off, a mode change or a
+  reboot.
+- In listen the core still receives (VEH, service frames); its transmissions are not sent
+  (single-shot → `Lost`, transport ends by its timers).
+- `PanelPort::setListenOnly(bool)`: firmware — `CANBus::restart(listenOnly, 1M)`; host
+  model — tracks the mode and refuses to transmit in listen, counts frames sent.
+- `canStatus`: `panel listen: waiting PANEL_HB 1/3`, `panel active …`, `panel listen: no
+  PANEL_HB, waiting 0/3`, `panel listen: bus-off 2, retry in 3 s`, `panel listen: bus-off
+  limit, retry in 42 s`.
+
+| ID | Expected |
+|---|---|
+| L1 | without PANEL_HB: 60 s, not one frame sent, never leaves listen; garbage, standard IDs, other IDs, wrong length, two HB, HB with gaps > 300 ms, alternating panels do not switch it |
+| L2 | after 3 valid PANEL_HB: normal, then the previous discovery path to `ready` |
+| L3 | no PANEL_HB for 1 s → listen; nothing sent from then |
+| L4 | bus-off → listen; pauses 1, 2, 4, 8, 16 s observed (no switch earlier even with PANEL_HB); 6th → held 60 s; 60 s clean resets `k` |
+| L5 | mutant «normal right on entry» caught; rigs and previous suites unchanged |
+
 ## Vehicle data in panel mode
 
 `PanelMode` writes `PanelCore::panelVehicle(now)` into the existing `vehicle` (rpm,
