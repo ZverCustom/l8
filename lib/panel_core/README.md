@@ -124,3 +124,11 @@ field that is not fresh:
 | V3 | the reverse direction kept: a fresh speed does not move rpm's `lastUpdate` / `engineRunning`; `engineRunning` and the 3 s threshold unchanged (C7 still passes) |
 | V4 | mutant "the view ignores the field's freshness" caught |
 | V5 | the other outputs used by the firmware checked for one stamp serving several fields (result in the report) |
+
+### Conditions for the firmware wiring (028)
+
+- `temp`: read together with `fresh & kFreshTemp` (0 is a real temperature).
+- rpm scale and shift light: `fresh & kFreshRpm` (300 ms); `engineRunning()` keeps
+  `lastUpdate` and 3 s.
+- STATUS_A `rpmFresh` (flags bit 4): from `panelVehicle(now).fresh & kFreshRpm`; the core
+  takes STATUS_A flags from the `statusA` callback and does not compute it.
