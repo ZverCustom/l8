@@ -29,7 +29,9 @@ struct Counters {
 
 // v6 addendum A5 (R92): listen first, normal after 3 PANEL_HB, back on loss or bus-off.
 constexpr uint8_t kHbNeeded = 3;
-constexpr uint32_t kHbGapMs = 300, kHbLossMs = 1000, kHoldMs = 60000, kCleanMs = 60000;
+// kHbMinMs (A5 rev 2): counted PANEL_HB at least this far apart — three periods, not three
+// retransmissions of one frame
+constexpr uint32_t kHbGapMs = 300, kHbMinMs = 50, kHbLossMs = 1000, kHoldMs = 60000, kCleanMs = 60000;
 constexpr uint8_t kBusOffLimit = 5;  // pauses 1, 2, 4, 8, 16 s; then held kHoldMs
 enum class Listen : uint8_t { Entry, NoHb, BusOff, Limit };
 

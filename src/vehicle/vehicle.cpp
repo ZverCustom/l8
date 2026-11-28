@@ -54,7 +54,7 @@ void vehicleSetBitrate(int sel) {
     brLocked = false;
     brWindowStart = millis();
     brWindowFrames = 0;
-    if (!canBus) return;
+    if (!canBus || !vmode::bitrateChangeRestarts(canMode)) return;  // R94: panel mode owns the driver
     canBus->restart(vmode::plan(canMode).listenOnly, vmode::bitrateFor(canMode, canBitrateSel));
     brWindowErrStart = canBus->busErrors();
 }

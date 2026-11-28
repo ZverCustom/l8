@@ -37,4 +37,8 @@ inline int bitrateFor(int mode, int sel) {
   return sel ? sel - 1 : kBr500k;
 }
 
+// A bitrate setting change restarts the driver (A5 rev 2, R94): never in panel mode, where only
+// PanelMode switches TWAI; the saved selection applies when the mode is left.
+inline bool bitrateChangeRestarts(int mode) { return !plan(mode).panel; }
+
 }  // namespace vmode

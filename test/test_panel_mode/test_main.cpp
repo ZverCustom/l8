@@ -643,6 +643,187 @@ static void test_d3_other_modes_readers_unchanged() {
       for (bool run : {false, true}) TEST_ASSERT_EQUAL(cut && off == 2 && !run, vrules::parkedCut(cut, off, run));
 }
 
+
+// ---- A5 rev 2 / R93: a bus with acknowledgements, panel + L8 nodes ----------------------------------
+
+// One L8 on the bus: the firmware's PanelMode over a model port, the real dispatcher.
+struct L8Node {
+  ModelPort port;
+  ModelStore store;
+  uint32_t* now;
+  uint32_t rng;
+  panel_mode::PanelMode* mode;
+  L8Node(uint32_t* clock, uint8_t macLast, uint32_t seed) : now(clock), rng(seed) {
+    panel_mode::Host h;
+    h.ctx = this;
+    h.now = [](void* c) { return *static_cast<L8Node*>(c)->now; };
+    h.dispatch = [](void*, const uint8_t*, size_t, uint8_t*, size_t) -> size_t { return 0; };
+    h.rand = xs;
+    h.randCtx = &rng;
+    mode = new panel_mode::PanelMode(port, store, h);
+    uint8_t mac[6] = {0x10, 0xBD, 0xA3, 0x5F, 0x51, macLast};
+    uint8_t boot[16];
+    for (int i = 0; i < 16; i++) boot[i] = uint8_t(macLast + i);
+    mode->enter(mac, 1, boot, "L8-X", "test", 3);
+  }
+  ~L8Node() { delete mode; }
+};
+
+// The bus: a frame is acknowledged only if a node other than the sender is in normal mode.
+// The panel (MCU) is always normal. Unacknowledged, the panel's controller is error-active
+// (TEC < 128: listeners get nothing, TEC += 8 per attempt) and then error-passive (listeners
+// get the frame and each retransmission; TEC no longer grows): A5 rev 2.
+struct AckBus {
+  uint32_t now = 1000;
+  std::vector<L8Node*> l8;
+  bool panelOn = true, foreignAcker = false, listenersAck = false;  // the last: a mutant of the model
+  int tec = 0, maxTec = 0;
+  uint32_t unacked = 0, acked = 0, copies = 0, cancelled = 0, l8Frames = 0, firstCopyAfter = 0;
+  uint32_t panelGen = 0x55667788;
+  int ackers(const L8Node* except) const {
+    int n = foreignAcker ? 1 : 0;
+    for (auto* x : l8)
+      if (x != except && (listenersAck || !x->port.listenOnly)) n++;
+    return n;
+  }
+  CanFrame hb() const {
+    CanFrame f;
+    f.id = panel_rx::kIdPanelHb;
+    uint8_t d[8] = {0xCA, 0xFE, 0x00, 0x37, uint8_t(panelGen >> 24), uint8_t(panelGen >> 16), uint8_t(panelGen >> 8), uint8_t(panelGen)};
+    memcpy(f.data, d, 8);
+    return f;
+  }
+  void panelSends(const CanFrame& f) {
+    if (ackers(nullptr) > 0) {
+      for (auto* x : l8) x->port.rxq.push_back(f);
+      if (tec) tec--;
+      acked++;
+      return;
+    }
+    // ≈ 7 attempts per ms for 5 ms, then the MCU cancels (kHpCancelMs)
+    for (int a = 0; a < 35; a++) {
+      unacked++;
+      if (tec < 128) {
+        tec += 8;
+      } else if (copies < 100000) {
+        if (!copies) firstCopyAfter = unacked;
+        copies++;
+        if (a % 7 == 0)  // listeners see every retransmission; a few per frame keep the queue small
+          for (auto* x : l8) x->port.rxq.push_back(f);
+      }
+      maxTec = tec > maxTec ? tec : maxTec;
+    }
+    cancelled++;
+  }
+  void step() {
+    now++;
+    if (panelOn && now % 100 == 0) panelSends(hb());
+    for (auto* x : l8) {
+      x->mode->tick();
+      auto out = x->port.sent;
+      x->port.sent.clear();
+      for (auto& [f, single] : out) {
+        l8Frames++;  // the panel (normal) acknowledges it
+        if (single) x->port.singleResultReady = true;
+        for (auto* y : l8)
+          if (y != x) y->port.rxq.push_back(f);
+      }
+    }
+  }
+};
+
+static void test_b1_panel_and_two_listening_l8_come_up() {
+  AckBus b;
+  L8Node a(&b.now, 0x01, 11), c(&b.now, 0x02, 12);
+  b.l8 = {&a, &c};
+  uint32_t t0 = b.now, upA = 0, upC = 0;
+  for (int ms = 0; ms < 3000; ms++) {
+    b.step();
+    if (!upA && !a.mode->listening()) upA = b.now - t0;
+    if (!upC && !c.mode->listening()) upC = b.now - t0;
+  }
+  char m[200];
+  snprintf(m, sizeof m, "B1: L8 normal after %u / %u ms; panel frames unacknowledged %u (cancelled %u), first copy to listeners after %u attempts, max TEC %d; L8 frames %u",
+           unsigned(upA), unsigned(upC), unsigned(b.unacked), unsigned(b.cancelled), unsigned(b.firstCopyAfter), b.maxTec, unsigned(b.l8Frames));
+  TEST_MESSAGE(m);
+  printf("%s\n", m);
+  TEST_ASSERT_TRUE_MESSAGE(upA && upC, "both L8 left listen-only");
+  TEST_ASSERT_TRUE_MESSAGE(b.firstCopyAfter >= 17, "listeners got nothing while the panel was error-active");
+  TEST_ASSERT_TRUE_MESSAGE(b.maxTec < 256, "the panel never goes bus-off on acknowledgement errors");
+  TEST_ASSERT_TRUE_MESSAGE(upA >= 200 && upC >= 200, "three periods, not three retransmissions");
+  TEST_ASSERT_TRUE(b.acked > 0);     // once an L8 is normal it acknowledges the panel
+  TEST_ASSERT_TRUE(b.l8Frames > 0);  // and its ANNOUNCE is acknowledged by the panel
+}
+
+static void test_b2_two_l8_without_panel_60_s_send_nothing() {
+  AckBus b;
+  b.panelOn = false;
+  L8Node a(&b.now, 0x01, 11), c(&b.now, 0x02, 12);
+  b.l8 = {&a, &c};
+  for (int ms = 0; ms < 60000; ms++) b.step();
+  TEST_ASSERT_EQUAL(0, a.port.sentCount + c.port.sentCount);
+  TEST_ASSERT_FALSE(a.port.everNormal || c.port.everNormal);
+}
+
+static void test_b3_foreign_acknowledging_node_without_panel() {
+  AckBus b;
+  b.panelOn = false;
+  b.foreignAcker = true;
+  L8Node a(&b.now, 0x01, 11), c(&b.now, 0x02, 12);
+  b.l8 = {&a, &c};
+  uint32_t r = 5;
+  for (int ms = 0; ms < 20000; ms++) {
+    if (ms % 10 == 0) {  // the foreign node's own traffic (not PANEL_HB)
+      CanFrame f;
+      f.extended = xs(&r) & 1;
+      f.id = f.extended ? (xs(&r) & 0x1FFFFFFF) : (xs(&r) & 0x7FF);
+      if (f.id == panel_rx::kIdPanelHb) f.id ^= 1;
+      for (auto* x : b.l8) x->port.rxq.push_back(f);
+    }
+    b.step();
+  }
+  TEST_ASSERT_TRUE(a.mode->listening() && c.mode->listening());
+  TEST_ASSERT_EQUAL(0, a.port.sentCount + c.port.sentCount);
+}
+
+static void test_b4_retransmissions_are_not_periods() {
+  World w;
+  w.hbOn = false;
+  for (int k = 0; k < 2; k++) {
+    for (int d = 0; d < 5; d++) w.feed(w.panelHb(w.panelGen));  // one frame, retransmitted
+    w.run(1);
+    TEST_ASSERT_EQUAL(k + 1, w.mode->hbCount());
+    w.run(99);
+  }
+  for (int d = 0; d < 5; d++) w.feed(w.panelHb(w.panelGen));
+  w.run(1);
+  TEST_ASSERT_FALSE(w.mode->listening());  // the third period
+  // 40 ms apart is a retransmission too: ignored, not a reset
+  World v;
+  v.hbOn = false;
+  v.feed(v.panelHb(v.panelGen));
+  v.run(40);
+  v.feed(v.panelHb(v.panelGen));
+  v.run(1);
+  TEST_ASSERT_EQUAL(1, v.mode->hbCount());
+}
+
+static void test_r94_bitrate_change_does_not_restart_the_driver_in_panel_mode() {
+  for (int mode : {0, 1, 2, 3, 5}) TEST_ASSERT_TRUE(vmode::bitrateChangeRestarts(mode));
+  TEST_ASSERT_FALSE_MESSAGE(vmode::bitrateChangeRestarts(4), "panel mode: only PanelMode switches TWAI");
+  // in normal state the port stays normal: nothing but PanelMode called setListenOnly
+  World w;
+  w.bringUp();
+  int toListen = w.port.toListen;
+  for (int sel = 0; sel <= 5; sel++)
+    if (vmode::bitrateChangeRestarts(4)) w.port.setListenOnly(vmode::plan(4).listenOnly);  // what vehicleSetBitrate would do
+  w.run(50);
+  TEST_ASSERT_EQUAL(toListen, w.port.toListen);
+  TEST_ASSERT_FALSE(w.mode->listening());
+  TEST_ASSERT_FALSE(w.port.listenOnly);
+  TEST_ASSERT_EQUAL_STRING("ready", w.mode->phase());
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_d1_old_modes_plan_unchanged_panel_off);
@@ -654,6 +835,11 @@ int main() {
   RUN_TEST(test_l3_panel_hb_lost_back_to_listen);
   RUN_TEST(test_l4_bus_off_listen_backoff_and_limit);
   RUN_TEST(test_l4_single_shot_in_flight_at_bus_off_is_bus_error);
+  RUN_TEST(test_b1_panel_and_two_listening_l8_come_up);
+  RUN_TEST(test_b2_two_l8_without_panel_60_s_send_nothing);
+  RUN_TEST(test_b3_foreign_acknowledging_node_without_panel);
+  RUN_TEST(test_b4_retransmissions_are_not_periods);
+  RUN_TEST(test_r94_bitrate_change_does_not_restart_the_driver_in_panel_mode);
   RUN_TEST(test_d2_enter_exit_and_overrun_voids_anchor);
   RUN_TEST(test_d3_readers_fresh_stale_none);
   RUN_TEST(test_d3_other_modes_readers_unchanged);

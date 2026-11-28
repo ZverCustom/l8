@@ -125,6 +125,7 @@ struct Node {
   std::unique_ptr<panel_mode::PanelMode> mode;
   PanelCore* core = nullptr;  // mode->core()
   bool mute = false, silent = false, pendingSingle = false;
+  int reportedListen = -1;
   uint32_t now = 0;
   std::vector<std::string> out;
 
@@ -345,6 +346,12 @@ int main(int argc, char** argv) {
       n.out.push_back("D " + r);
     } else if (!strcmp(cmd, "STATE")) {
       n.out.push_back("E state " + std::to_string(settingsRevision()) + " " + stateHash());
+    }
+    // the rig's bus model needs to know who acknowledges frames (A5 rev 2): M 1 listen, M 0 normal
+    int listening = n.mode->listening() ? 1 : 0;
+    if (listening != n.reportedListen) {
+      n.reportedListen = listening;
+      n.out.push_back("M " + std::to_string(listening));
     }
     for (auto& l : n.out) puts(l.c_str());
     puts(".");

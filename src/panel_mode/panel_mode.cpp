@@ -120,7 +120,9 @@ void PanelMode::noteHb(const zmb::CanFrame& f, uint32_t t) {
     return;
   }
   if (before(t, holdUntil_)) return;  // pause after bus-off: not counted
-  if (hbCount_ && id == hbId_ && gen == hbGen_ && t - hbLast_ <= kHbGapMs) {
+  bool same = hbCount_ && id == hbId_ && gen == hbGen_;
+  if (same && t - hbLast_ < kHbMinMs) return;  // a retransmission of the same period: ignored
+  if (same && t - hbLast_ <= kHbGapMs) {
     hbCount_++;
   } else {
     hbCount_ = 1;
